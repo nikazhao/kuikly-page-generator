@@ -271,6 +271,12 @@ KUIKLY_JAR_API_TRUTH = """
 - 字重：~~fontWeight(600)~~ → 预定义方法 `fontWeightBold()` / `fontWeightMedium()` /
   `fontWeightNormal()` / `fontWeightLight()` / `fontWeightExtraLight()`
 - 密码输入：~~secureText() / password()~~ → `keyboardTypePassword()`
+- 键盘类型只有三个：`keyboardTypePassword()` / `keyboardTypeNumber()` / `keyboardTypeEmail()`；
+  ~~keyboardTypePhonePad~~ 等不存在，手机号/数字输入一律用 `keyboardTypeNumber()`
+- 边框：`Border(lineWidth, lineStyle, color)` 三参构造，**lineStyle 必传、无默认值**——
+  `border(Border(1f, color = ...))` 会编译报错 no value passed for parameter 'lineStyle'；
+  正确写法：`border(Border(1f, BorderStyle.SOLID, Color(0xFF4A90D9)))`
+  （BorderStyle 枚举仅 SOLID / DOTTED / DASHED）
 - 页面尺寸：~~pageWidth / pageHeight~~ → `pagerData.pageViewWidth` / `pagerData.pageViewHeight`
 
 **Input 事件真名与取值（InputEvent / InputParams，javap 实测）**
