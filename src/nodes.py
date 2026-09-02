@@ -355,12 +355,11 @@ def node_compile_check(state: Dict[str, Any]) -> Dict[str, Any]:
     # 规则检查（快）
     rule_errors = _rule_check(code)
 
-    # LLM 检查（深）
-    # 注入 API 参考：指控纪律要求"API 类指控须有参考印证"，审查器手里必须先有参考。
-    # （用例8实测：审查器无据断言 pagerData / Input / core.pager.Pager 不存在，
-    # 而这三条恰恰是知识源里的真实 API，假指控把 3 次修正额度全部耗光）
-    prompt = fill_prompt(get_prompt("compile_check"), code=code,
-                         api_reference=get_kuikly_api_reference())
+    # LLM 检查（深）。注意：刻意不注入 api_reference——实测（eval/report_apiref.md）
+    # 注入后审查器把参考里的风格建议升级成海量假指控（"10.0f 应写 10f"逐行报、
+    # 自相矛盾的"不支持 text 应用 title"+"不支持 title 应用 text"成对出现），
+    # 单案错误数冲到 116、全量 9/10→6/10，已回退。指控纪律保留"无据不指控"。
+    prompt = fill_prompt(get_prompt("compile_check"), code=code)
     llm_result = call_llm_json(_get_llm(), prompt)
 
     llm_errors = llm_result.get("errors", [])

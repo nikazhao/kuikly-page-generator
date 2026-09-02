@@ -528,9 +528,6 @@ PROMPT_COMPILE_CHECK = """你是 Kuikly Kotlin 编译检查器。审查以下代
 {code}
 ```
 
-### Kuikly API 参考（断言"某 API 不存在/用法错误"前必须先在此查证）
-{api_reference}
-
 ### Kuikly 编译规则
 1. 必须有 @Page 注解
 2. 必须继承 Pager()（或 BasePager）
