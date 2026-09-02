@@ -562,13 +562,14 @@ def test_drop_unbacked_api_claims():
     finally:
         n._find_kuikly_classpath = orig
 
-    # 场景4：正则覆盖 v8 全部假指控形态
+    # 场景4：正则覆盖 v8 假指控与全量跑暴露的「应为」形态（用例8：5 条 vfor 假指控）
     v8_claims = [
         "asyncToNativeMethod 方法不存在于 Kuikly Module 基类中，应使用 callNativeMethod",
         "pagerData 属性不存在于 Pager 类中",
         "Input 组件不支持 textDidChange 事件",
         "Button 组件不支持 titleAttr 属性",
         "AlertDialog 组件不支持 clickActionButton 事件，应使用 buttonClick 事件",
+        "第 55 行：vfor 语法错误，应为 vfor(ctx.hotTags) { tag -> ... }",
     ]
     for c in v8_claims:
         assert n._API_CLAIM_RE.search(c), f"正则应命中: {c}"

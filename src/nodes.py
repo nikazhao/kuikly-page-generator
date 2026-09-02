@@ -344,7 +344,7 @@ def _infer_imports(code: str) -> list[str]:
 # ═══════════════════════════════════════════════════════════════
 # 节点⑤：编译检查（规则 + LLM 双重检查）
 # ═══════════════════════════════════════════════════════════════
-_API_CLAIM_RE = re.compile(r"不存在|不支持|应使用|应改用|并非|并没有")
+_API_CLAIM_RE = re.compile(r"不存在|不支持|应使用|应改用|应为|并非|并没有")
 
 
 def _drop_unbacked_api_claims(llm_errors: list[str], rule_errors: list[str]) -> list[str]:

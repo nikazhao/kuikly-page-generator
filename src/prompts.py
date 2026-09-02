@@ -294,6 +294,36 @@ KUIKLY_JAR_API_TRUTH = """
 - base.Attr：`size(Float,Float)` / `backgroundColor(long|Color)` / `borderRadius(Float|4F|BorderRectRadius)` /
   `margin(Float|4F)`；ILayoutAttr：width/height/flex/top/left/right/positionType/alignSelf 等
 
+**ImageUri（本地资源专用）**
+- Companion 只有 commonAssets/pageAssets/file 三个工厂——**没有 network()**；
+  网络图片直接 `src(url字符串)`，不要包 ImageUri
+
+**Switch / SharedPreferences（javap + 真编译探针验证）**
+- Switch 事件：`switchOnChanged { isOn -> }`（参数直接是 Boolean）——~~switchChange~~ 不存在
+- Switch attr：`onColor(Color)` / `unOnColor(Color)` / `thumbColor(Color)`
+- SharedPreferencesModule **没有 getBoolean/setBoolean**：开关状态用 `setInt("k", 1)` /
+  `getInt("k") == 1` 存取；可用：setString/setFloat/setInt/setObject/getString/getInt/getFloat/getObject/getItem/setItem
+
+**Refresh / Scroller（真编译探针验证）**
+- `Refresh { }` **只能写在 Scroller 内部**（扩展函数 receiver 是 ScrollerView），直接写在
+  页面 body 会报 receiver mismatch
+- RefreshAttr 没有 `refreshing(...)` 方法，用**属性赋值** `refreshEnable = true`（不是函数调用）
+- 事件：`refreshStateDidChange { state -> }`——~~onRefresh~~ 不存在；FooterRefresh 同名事件
+
+**NetworkModule（core 真实存在）**
+- import 路径：`com.tencent.kuikly.core.module.NetworkModule`（~~core.network.NetworkModule~~ 是错的）
+- `requestPost(url, JSONObject) { response, success, msg -> }` 三参 lambda 回调——
+  **没有 Callback 类**，不要写 `object : Callback { ... }`
+- 方法族：requestGet / requestPost / httpRequest / requestGetBinary
+
+**vfor 列表循环（真编译探针验证）**
+- 数据必须包在圆括号 lambda：`vfor({ ctx.itemList }) { item -> ... }`——
+  ~~vfor(ctx.itemList)~~ 直传编译不过
+- 数据源属性用 `by observableList<T>()`（import com.tencent.kuikly.core.reactive.handler.observableList）
+
+**进度条（core 无 ProgressBar 组件）**
+- jar 里没有任何 ProgressBar——进度条自己拼：外层 View 圆角背景色 + 内层 View 按百分比宽度
+
 **Module 与 padding**
 - 自定义 Module 直接定义方法即可，`Module` 基类没有 callNativeMethod
 - `acquireModule<T>()` 编译器按可空处理，调用其方法时注意空安全（`?.`）
