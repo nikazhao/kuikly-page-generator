@@ -56,6 +56,12 @@ def run_eval(cases_path: str, out_path: str, limit: int | None = None, only: int
             code = final.get("final_code", "") or ""
             code_len = len(code)
             compliance = _kuikly_compliance(code)
+            # 落盘最终代码：编译错误只有 行:列 对着代码才能定位根因（无落盘则临时文件已删、无从复盘）
+            code_dir = os.path.join(_PROJECT_ROOT, "eval", "code")
+            os.makedirs(code_dir, exist_ok=True)
+            _stem = os.path.splitext(os.path.basename(out_path))[0]
+            with open(os.path.join(code_dir, f"{_stem}_case{i + 1}.kt"), "w", encoding="utf-8") as f:
+                f.write(code)
             compile_errors = final.get("compile_errors", []) or []
             err_msg = ""
         except Exception as e:  # noqa: BLE001 — 单条失败不影响整体评估

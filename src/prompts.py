@@ -273,9 +273,13 @@ KUIKLY_JAR_API_TRUTH = """
 - 密码输入：~~secureText() / password()~~ → `keyboardTypePassword()`
 - 页面尺寸：~~pageWidth / pageHeight~~ → `pagerData.pageViewWidth` / `pagerData.pageViewHeight`
 
-**Input 事件真名（InputEvent）**
+**Input 事件真名与取值（InputEvent / InputParams，javap 实测）**
 - 文本变更：`textDidChange { params -> }`（不是 onTextChange / textChanged）
-- 其余可用：`inputFocus` / `inputBlur` / `inputReturn` / `onTextReturn`
+- **回调参数是 InputParams 对象，不是 String**：取输入文本必须写 `params.text`
+  （错误写法 `textDidChange { text -> username = text }` 会编译报
+  assignment type mismatch: actual type is 'InputParams'）
+- InputParams 字段：`text: String` / `imeAction: String` / `length: Int`
+- 其余事件：`inputFocus` / `inputBlur` / `inputReturn` / `onTextReturn`（回调参数同为 InputParams）
 
 **存在但易被误判为不存在的方法（ContainerAttr / base.Attr，勿删勿改）**
 - `flexDirection()` / `flexDirectionRow()` / `flexDirectionColumn()` /
