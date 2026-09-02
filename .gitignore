@@ -13,3 +13,7 @@ output/
 
 # ── macOS ───────────────────────────────
 .DS_Store
+
+# kotlinc 误指输出目录产生的编译垃圾（-d 落在仓库根）
+/META-INF/
+/com/
