@@ -253,14 +253,56 @@ def _component_whitelist_text() -> str:
     return "\n".join(lines)
 
 
+# ─── jar 真值漂移修正块 ──────────────────────────────────────
+# 依据 core-2.16.0-2.1.21（宿主工程 KUIKLY_VERSION 同版本）classes.jar 的
+# javap/strings 实测结果整理，仅收录「知识源/模型易写错」的 API 族，
+# 不做全量 API 转储。修正的是真实编译错误（unresolved reference / 类型不匹配）。
+KUIKLY_JAR_API_TRUTH = """
+### jar 实测 API 真值（javap 核验，与下方规则冲突时以本节为准）
+
+**import 包路径（易错）**
+- Button 在 `com.tencent.kuikly.core.views.compose.Button`，不在 views 下
+- Center / Row / Column 在 `com.tencent.kuikly.core.views.layout`（如 CenterViewKt 提供）
+- FlexDirection / FlexAlign / FlexJustifyContent 在 `com.tencent.kuikly.core.layout`，
+  需显式 import：`FlexDirection.ROW` / `FlexDirection.COLUMN` / `ROW_REVERSE` / `COLUMN_REVERSE`
+
+**attr 方法真名（错误 → 正确）**
+- Text 字色：~~textColor(...)~~ → `color(long 或 Color)`（TextAttr 无 textColor）
+- 字重：~~fontWeight(600)~~ → 预定义方法 `fontWeightBold()` / `fontWeightMedium()` /
+  `fontWeightNormal()` / `fontWeightLight()` / `fontWeightExtraLight()`
+- 密码输入：~~secureText() / password()~~ → `keyboardTypePassword()`
+- 页面尺寸：~~pageWidth / pageHeight~~ → `pagerData.pageViewWidth` / `pagerData.pageViewHeight`
+
+**Input 事件真名（InputEvent）**
+- 文本变更：`textDidChange { params -> }`（不是 onTextChange / textChanged）
+- 其余可用：`inputFocus` / `inputBlur` / `inputReturn` / `onTextReturn`
+
+**存在但易被误判为不存在的方法（ContainerAttr / base.Attr，勿删勿改）**
+- `flexDirection()` / `flexDirectionRow()` / `flexDirectionColumn()` /
+  `alignItems()` / `alignItemsCenter()` / `alignItemsFlexEnd()` / `alignItemsStretch()` 均真实存在
+- base.Attr：`size(Float,Float)` / `backgroundColor(long|Color)` / `borderRadius(Float|4F|BorderRectRadius)` /
+  `margin(Float|4F)`；ILayoutAttr：width/height/flex/top/left/right/positionType/alignSelf 等
+
+**Module 与 padding**
+- 自定义 Module 直接定义方法即可，`Module` 基类没有 callNativeMethod
+- `acquireModule<T>()` 编译器按可空处理，调用其方法时注意空安全（`?.`）
+- paddingLeft/paddingRight 标识符虽在 jar 中，但未在布局 attr 签名证实——**避免使用**，
+  用 `padding(Float)` 或 `paddingTop/paddingBottom` 等已证实方法
+"""
+
+
 def get_kuikly_api_reference(dsl_type: str = "dsl") -> str:
     """动态获取 Kuikly 官方知识，替代手写静态 API 表。
 
     优先读取已克隆的 Tencent-TDS/KuiklyUI-AI 官方规则；
     若仓库未克隆，降级回退到本文件手写的 KUIKLY_API_REFERENCE。
+    两个分支统一追加 jar 真值漂移修正块（assemble + auto_fix 受益；
+    compile_check 刻意不调用本函数——参考注入会放大审查器幻觉，
+    见 eval/report_apiref.md 实证）。
     """
     official = load_kuikly_rules(dsl_type)
-    return official if official else KUIKLY_API_REFERENCE
+    base = official if official else KUIKLY_API_REFERENCE
+    return base + "\n" + KUIKLY_JAR_API_TRUTH
 
 
 # ─── 节点①：需求解析 Prompt ─────────────────────────────────
