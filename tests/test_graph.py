@@ -522,3 +522,53 @@ def test_autofix_uses_deterministic_imports():
     src = inspect.getsource(n.node_auto_fix)
     assert "_infer_imports(fixed_code)" in src, "node_auto_fix 应重算 import"
     assert "_merge_imports(fixed_code, imports)" in src, "node_auto_fix 应重注入 import"
+
+
+def test_drop_unbacked_api_claims():
+    """真编译 0 错误时，无编译佐证的「API 存在性」指控应被丢弃（v8 实测 12/13 假）。
+
+    生成器经漂移块学会 jar 真实 API（pagerData/titleAttr 等），审查器知识落后
+    把它们指控为「不存在」——但代码 kotlinc 真编译 0 错误，编译器才是 API 真假
+    的唯一权威。非真编译口径 / kotlinc 本身报错时不启用。
+    """
+    import src.nodes as n
+
+    fake_cp = "/tmp/fake-classes.jar"
+
+    # 场景1：classpath 有 + 编译 0 错误 → API 存在性指控丢弃，其他保留
+    orig = n._find_kuikly_classpath
+    n._find_kuikly_classpath = lambda: fake_cp
+    try:
+        llm_errors = [
+            "第 56 行：pagerData 属性不存在于 Pager 类中，应使用 pageWidth",
+            "第 72 行：Input 组件不支持 textDidChange 事件，应使用 textChange 事件",
+            "第 17 行：import 与前面的具体 import 冲突，应移除通配符导入",
+        ]
+        kept = n._drop_unbacked_api_claims(llm_errors, [])
+        assert len(kept) == 1, f"应只剩 1 条非存在性指控，实际 {kept}"
+        assert "通配符" in kept[0]
+
+        # 场景2：classpath 无 → 不过滤，原样保留
+        n._find_kuikly_classpath = lambda: ""
+        kept = n._drop_unbacked_api_claims(llm_errors, [])
+        assert len(kept) == 3, "无 classpath 时不启用过滤"
+
+        # 场景3：classpath 有但 kotlinc 本身报错 → 不过滤（编译器正忙，无权威）
+        n._find_kuikly_classpath = lambda: fake_cp
+        kept = n._drop_unbacked_api_claims(
+            llm_errors, ["/tmp/x.kt:12:34: error: unresolved reference 'foo'"]
+        )
+        assert len(kept) == 3, "kotlinc 有真错误时不启用过滤"
+    finally:
+        n._find_kuikly_classpath = orig
+
+    # 场景4：正则覆盖 v8 全部假指控形态
+    v8_claims = [
+        "asyncToNativeMethod 方法不存在于 Kuikly Module 基类中，应使用 callNativeMethod",
+        "pagerData 属性不存在于 Pager 类中",
+        "Input 组件不支持 textDidChange 事件",
+        "Button 组件不支持 titleAttr 属性",
+        "AlertDialog 组件不支持 clickActionButton 事件，应使用 buttonClick 事件",
+    ]
+    for c in v8_claims:
+        assert n._API_CLAIM_RE.search(c), f"正则应命中: {c}"

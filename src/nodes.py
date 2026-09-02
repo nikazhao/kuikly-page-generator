@@ -344,6 +344,29 @@ def _infer_imports(code: str) -> list[str]:
 # ═══════════════════════════════════════════════════════════════
 # 节点⑤：编译检查（规则 + LLM 双重检查）
 # ═══════════════════════════════════════════════════════════════
+_API_CLAIM_RE = re.compile(r"不存在|不支持|应使用|应改用|并非|并没有")
+
+
+def _drop_unbacked_api_claims(llm_errors: list[str], rule_errors: list[str]) -> list[str]:
+    """真编译口径下丢弃无编译佐证的「API 存在性」指控（v8 实测 13 条假指控中 12 条命中）。
+
+    背景：漂移块注入后生成器会使用 jar 真实 API（pagerData/titleAttr/clickActionButton…），
+    而 compile_check 刻意不注入知识源（eval/report_apiref.md 证伪注入有害），审查器按
+    旧知识把这些正确 API 指控为「不存在」——但同一份代码 kotlinc 真编译 0 错误。
+    API 真假编译器是唯一权威：真编译 0 错误时，存在性断言类指控必为假。非真编译
+    口径（无 classpath）或 kotlinc 本身报错时不启用，保持原行为。
+    """
+    if not _find_kuikly_classpath():
+        return llm_errors
+    if any(".kt:" in e and ": error:" in e for e in rule_errors):
+        return llm_errors  # 编译器自己报错，无法作为「代码合法」的权威
+    kept = [e for e in llm_errors if not _API_CLAIM_RE.search(e)]
+    dropped = len(llm_errors) - len(kept)
+    if dropped:
+        print(f"  [过滤] 真编译 0 错误，丢弃 {dropped} 条无编译佐证的 API 存在性指控")
+    return kept
+
+
 def node_compile_check(state: Dict[str, Any]) -> Dict[str, Any]:
     """对生成的代码做编译检查（先规则检查，再 LLM 检查）"""
     state = _state_values(state)
@@ -363,6 +386,8 @@ def node_compile_check(state: Dict[str, Any]) -> Dict[str, Any]:
     llm_result = call_llm_json(_get_llm(), prompt)
 
     llm_errors = llm_result.get("errors", [])
+    # 真编译口径下，无编译佐证的「API 存在性」假指控确定性丢弃（v8 实测 12/13 假）
+    llm_errors = _drop_unbacked_api_claims(llm_errors, rule_errors)
     # 防御：审查器给 passed=false 却列不出任何问题 → 无据可修，视为通过。
     # 否则 auto_fix 会拿着空问题列表空转，白烧 3 次修正额度（prompt 的指控
     # 纪律要求"passed=true 当且仅当 errors 为空"，这里是同一纪律的确定性兜底）。
