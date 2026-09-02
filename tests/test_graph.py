@@ -167,9 +167,44 @@ def test_classpath_noise_filter():
     assert _is_classpath_noise("/x.kt:16:28: error: this type is final, so it cannot be extended.")
     assert _is_classpath_noise("/x.kt:16:28: error: none of the following candidates is applicable:")
     assert _is_classpath_noise("/x.kt:17:5: error: 'moduleName' overrides nothing.")
+    # 比较符作用在类型未知的接收者上（用例4实测的误报）
+    assert _is_classpath_noise(
+        "/x.kt:111:47: error: 'operator' modifier is required on 'fun <T> Comparable<T>.compareTo(other: T): Int'"
+    )
     # 真语法错误必须保留
     assert not _is_classpath_noise("/x.kt:6:6: error: syntax error: Expecting '}'.")
     assert not _is_classpath_noise("/x.kt:2:10: error: Expecting ')'.")
+
+
+def test_dedupe_class_imports():
+    """测试同名类多路径导入去重（用例4实测修复）。
+
+    LLM 组装可能写错组件包路径（views.Center），确定性注入又会补正确路径
+    （views.layout.Center）→ 同名类双路径共存。去重必须保留白名单优选路径、
+    删除其余，且不动通配 import 和唯一导入。
+    """
+    from src.nodes import _dedupe_class_imports
+    code = "\n".join([
+        "package com.tencent.kuikly.demo.pages",
+        "",
+        "import com.tencent.kuikly.core.views.Center",          # 错误路径，应删
+        "import com.tencent.kuikly.core.views.*",               # 通配，保留
+        "import com.tencent.kuikly.core.views.layout.Center",   # 正确路径，保留
+        "import com.tencent.kuikly.core.base.Color",            # 唯一导入，保留
+        "",
+        "@Page(\"P\")",
+        "internal class P : Pager() {",
+        "    override fun body(): ViewBuilder { return {} }",
+        "}",
+    ])
+    out = _dedupe_class_imports(code)
+    assert "import com.tencent.kuikly.core.views.layout.Center" in out
+    assert "import com.tencent.kuikly.core.views.Center\n" not in out
+    assert "import com.tencent.kuikly.core.views.*" in out
+    assert "import com.tencent.kuikly.core.base.Color" in out
+    # 无重复时原样返回
+    assert _dedupe_class_imports("import com.tencent.kuikly.core.base.Color\n\nclass X") == \
+        "import com.tencent.kuikly.core.base.Color\n\nclass X"
 
 
 def test_test_cases_json():

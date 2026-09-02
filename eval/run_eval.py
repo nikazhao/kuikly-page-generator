@@ -34,9 +34,11 @@ from src.run_pipeline import run_pipeline
 from src.nodes import _kuikly_compliance
 
 
-def run_eval(cases_path: str, out_path: str, limit: int | None = None) -> dict:
+def run_eval(cases_path: str, out_path: str, limit: int | None = None, only: int | None = None) -> dict:
     with open(cases_path, "r", encoding="utf-8") as f:
         cases = json.load(f)
+    if only:
+        cases = [cases[only - 1]]  # 1-based，定位复现单条失败用例
     if limit:
         cases = cases[:limit]
 
@@ -54,10 +56,12 @@ def run_eval(cases_path: str, out_path: str, limit: int | None = None) -> dict:
             code = final.get("final_code", "") or ""
             code_len = len(code)
             compliance = _kuikly_compliance(code)
+            compile_errors = final.get("compile_errors", []) or []
             err_msg = ""
         except Exception as e:  # noqa: BLE001 — 单条失败不影响整体评估
             success, fix, err, code_len = False, 0, -1, 0
             compliance = {"score": 0.0, "hard_passed": 0, "hard_total": 0, "hard_failed": []}
+            compile_errors = []
             elapsed = round(time.time() - t0, 2)
             err_msg = f"{type(e).__name__}: {e}"
         results.append({
@@ -72,6 +76,7 @@ def run_eval(cases_path: str, out_path: str, limit: int | None = None) -> dict:
             "compliance_score": compliance.get("score", 0.0),
             "compliance_hard": f"{compliance.get('hard_passed', 0)}/{compliance.get('hard_total', 0)}",
             "compliance_failed": compliance.get("hard_failed", []),
+            "compile_errors": compile_errors,
             "error": err_msg,
         })
         print(f"[{i + 1}/{len(cases)}] {'✅' if success else '❌'} {req[:40]} | fix={fix} err={err} 符合度={compliance.get('score', 0):.0%} {elapsed}s")
@@ -127,8 +132,10 @@ def _write_report(out_path: str, summary: dict, results: list[dict], cases_path:
     if failed:
         lines.append("\n## 未通过用例\n")
         for r in failed:
-            detail = r["error"] or "未产出最终代码"
+            detail = r["error"] or f"修正 {r['fix_attempts']} 次后仍剩 {r['error_count']} 个问题"
             lines.append(f"- #{r['idx']} {r['requirement'][:40]} — {detail}")
+            for ce in r.get("compile_errors", []):
+                lines.append(f"    - {ce}")
 
     low_compliance = [r for r in results if r["compliance_failed"]]
     if low_compliance:
@@ -149,8 +156,9 @@ def main() -> None:
     parser.add_argument("--cases", default=os.path.join(_PROJECT_ROOT, "tests", "test_cases.json"))
     parser.add_argument("--out", default=os.path.join(_PROJECT_ROOT, "eval", "report.md"))
     parser.add_argument("--limit", type=int, default=None, help="只跑前 N 条用例")
+    parser.add_argument("--only", type=int, default=None, help="只跑第 N 条用例（1-based，定位复现单条失败）")
     args = parser.parse_args()
-    run_eval(args.cases, args.out, limit=args.limit)
+    run_eval(args.cases, args.out, limit=args.limit, only=args.only)
 
 
 if __name__ == "__main__":

@@ -229,6 +229,54 @@ def _merge_imports(code: str, imports: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _dedupe_class_imports(code: str) -> str:
+    """同名类被 import 到多个路径时只保留一个（确定性修复，不依赖 LLM）。
+
+    用例4 实测：LLM 组装写了 `import com.tencent.kuikly.core.views.Center`（错误
+    路径），确定性注入又补了 `import com.tencent.kuikly.core.views.layout.Center`
+    （正确路径）→ 同名类双路径共存，LLM 自审反复报「重复导入冲突」且 auto_fix
+    无法收敛。按简单类名分组，保留白名单优选路径，其余整行删除。
+    通配 import（`.*`）不参与去重（Kotlin 允许通配与精确并存，不构成同名冲突）。
+    """
+    if "import " not in code:
+        return code
+    # 同名类的优选包：精确映射优先（路 B② 白名单坑位），无映射时保留首次出现
+    _PREFERRED = {
+        "Center": "com.tencent.kuikly.core.views.layout",
+        "Button": "com.tencent.kuikly.core.views.compose",
+    }
+    lines = code.split("\n")
+    by_name: dict[str, list[tuple[int, str, str]]] = {}  # 类名 -> [(行号, 全路径, 包名)]
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if not s.startswith("import "):
+            continue
+        path = s[len("import "):].strip()
+        if path.endswith(".*") or "." not in path:
+            continue
+        pkg, name = path.rsplit(".", 1)
+        by_name.setdefault(name, []).append((i, path, pkg))
+    drop_idx = set()
+    for entries in by_name.values():
+        if len(entries) <= 1:
+            continue
+        preferred_pkg = _PREFERRED.get(entries[0][1].rsplit(".", 1)[1])
+        keep = None
+        if preferred_pkg:
+            for e in entries:
+                if e[2] == preferred_pkg:
+                    keep = e
+                    break
+        if keep is None:
+            keep = entries[0]
+        for e in entries:
+            if e is not keep:
+                drop_idx.add(e[0])
+    if not drop_idx:
+        return code
+    return "\n".join(ln for i, ln in enumerate(lines) if i not in drop_idx)
+
+
 def _infer_imports(code: str) -> list[str]:
     """从代码中推断需要的 import 语句（含路 B 扩充的组件与 Module 类）。
 
@@ -302,6 +350,7 @@ def node_compile_check(state: Dict[str, Any]) -> Dict[str, Any]:
     print("\n⑤ 编译检查")
 
     code = state.get("assembled_code", state.get("final_code", ""))
+    code = _dedupe_class_imports(code)  # 确定性修同名类多路径导入（用例4实测），两条路都受益
 
     # 规则检查（快）
     rule_errors = _rule_check(code)
@@ -323,6 +372,9 @@ def node_compile_check(state: Dict[str, Any]) -> Dict[str, Any]:
         "error_count": len(errors),
         # 快乐路径：首次检查就通过时不会进 auto_fix，这里必须把最终代码落盘
         "final_code": code if passed else state.get("final_code", ""),
+        # 失败时把去重后的代码回写，auto_fix 基于干净代码修正（否则同名类导入会
+        # 一直在 LLM 自审里报"重复导入"导致循环不收敛——用例4实测）
+        **({"assembled_code": code} if not passed else {}),
     }
 
 
@@ -357,6 +409,9 @@ def _is_classpath_noise(line: str) -> bool:
         "this type is final",            # 继承无法解析的基类，被误报为 final 不可继承
         "none of the following candidates",  # 构造函数无法解析（基类缺失）
         "overrides nothing",             # override 的方法在无法解析的基类中找不到
+        # 比较符作用在类型未知的接收者上：`a > b` 里 a 的类型缺 Kuikly 签名解析不了，
+        # kotlinc 把 > 解析到 Comparable.compareTo 并抱怨缺 operator 修饰（用例4实测）
+        "modifier is required",
     )
     low = line.lower()
     return any(n in low for n in _CLASSPATH_NOISE)
