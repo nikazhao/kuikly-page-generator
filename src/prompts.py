@@ -265,6 +265,7 @@ KUIKLY_JAR_API_TRUTH = """
 - Center / Row / Column 在 `com.tencent.kuikly.core.views.layout`（如 CenterViewKt 提供）
 - FlexDirection / FlexAlign / FlexJustifyContent 在 `com.tencent.kuikly.core.layout`，
   需显式 import：`FlexDirection.ROW` / `FlexDirection.COLUMN` / `ROW_REVERSE` / `COLUMN_REVERSE`
+- vif / velseif / velse 在 `com.tencent.kuikly.core.directives`，需显式 import
 
 **attr 方法真名（错误 → 正确）**
 - Text 字色：~~textColor(...)~~ → `color(long 或 Color)`（TextAttr 无 textColor）
@@ -298,6 +299,33 @@ KUIKLY_JAR_API_TRUTH = """
 - `acquireModule<T>()` 编译器按可空处理，调用其方法时注意空安全（`?.`）
 - paddingLeft/paddingRight 标识符虽在 jar 中，但未在布局 attr 签名证实——**避免使用**，
   用 `padding(Float)` 或 `paddingTop/paddingBottom` 等已证实方法
+
+**Button（compose 包）真实形态（javap + 真编译探针验证）**
+- 按钮文字与文字样式写在 `titleAttr { }` 子作用域（TextAttr），不是 Button attr 顶层：
+  ```kotlin
+  Button {
+      attr {
+          size(200f, 48f)
+          titleAttr { text("登录"); fontSize(18f); color(Color.WHITE) }
+      }
+  }
+  ```
+- Button attr 顶层**没有** text()/color()/fontSize()/fontWeightXxx()——写了必报 unresolved
+- Button 事件只有 `touchDown` / `touchUp` / `touchMove`（TouchParams），**没有 onClick**：
+  `event { touchDown { ... } }`
+
+**vif 条件渲染（真编译探针验证）**
+- `vif({ 条件 }) { 内容 }`：条件用圆括号 lambda、内容用尾 lambda，**两个都必传（无默认值）**
+- 语义：把被条件化的子视图写进 vif 的内容块，不是把 vif 挂在该视图自己身上：
+  ```kotlin
+  View {
+      attr { size(100f, 20f) }
+      vif({ ctx.msg.isNotEmpty() }) {
+          Text { attr { text(ctx.msg) } }
+      }
+  }
+  ```
+- 单写 `vif({ 条件 })` 不带内容块会编译报错（缺 content 参数）
 """
 
 
