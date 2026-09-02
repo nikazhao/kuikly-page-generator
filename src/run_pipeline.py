@@ -75,6 +75,44 @@ def run_pipeline(
     return final, steps
 
 
+def run_pipeline_bestof(
+    user_requirement: str,
+    page_name: str = "",
+    rolls: int = 3,
+    recursion_limit: int = 30,
+) -> tuple[dict, list[dict]]:
+    """Best-of-N 采样：循环跑流水线，首个 success 即返回；全失败返回错误数最少的 roll。
+
+    背景（2026-09-03 实测）：单 roll 通过率受 LLM roll 随机性主导（全量五轮
+    7→7→8→9→7 /10，失败用例每轮换血），Best-of-3 实测把全量 eval 从 7/10
+    提到 10/10（报告 report_realcp_full_v8_bestof3.md）。通过率 = 1-(1-p)^N，
+    把「生成质量」从抽样问题变成工程参数（N 换通过率）。
+
+    成本：成功场景多数第 1 roll 就返回（lazy 语义与 eval --retry-failed 一致：
+    后续 roll 只在失败时才花）；最坏 rolls×单次耗时。
+    返回的 final 额外带：bestof_attempt（成功/选中的 roll 序号，1-based）、
+    bestof_rolls（总 roll 上限）、bestof_saved_by_retry（是否靠重试救回）。
+    """
+    best: tuple[dict, list[dict]] | None = None
+    for attempt in range(1, max(1, rolls) + 1):
+        final, steps = run_pipeline(
+            user_requirement, page_name=page_name, collect_steps=False,
+            recursion_limit=recursion_limit,
+        )
+        final = dict(final)
+        final["bestof_attempt"] = attempt
+        final["bestof_rolls"] = max(1, rolls)
+        if final.get("success"):
+            final["bestof_saved_by_retry"] = attempt > 1
+            return final, steps
+        # 失败：记录错误数最少（最接近成功）的 roll 作为兜底诊断
+        err = final.get("error_count", 0) or 0
+        if best is None or err < (best[0].get("error_count", 0) or 0):
+            best = (final, steps)
+    assert best is not None, "rolls >= 1 时循环至少执行一次"
+    return best
+
+
 def truncate_field(value, limit: int = 120) -> str:
     """把长文本字段截断，用于 UI 时间线展示，避免刷屏。"""
     if not isinstance(value, str):

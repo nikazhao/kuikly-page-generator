@@ -589,3 +589,65 @@ def test_drop_unbacked_api_claims():
     ]
     for c in v8_claims:
         assert n._API_CLAIM_RE.search(c), f"正则应命中: {c}"
+
+
+def test_run_pipeline_bestof(monkeypatch):
+    """Best-of-N 采样：首个 success 即返回；全失败返回错误数最少的 roll。
+
+    2026-09-03 实测：单 roll 通过率受 roll 随机性主导（全量五轮 7-9/10 震荡），
+    Best-of-3 全量 eval 10/10。这里 mock run_pipeline 验证三种路径。
+    """
+    import src.run_pipeline as rp
+
+    def _final(success: bool, err: int) -> dict:
+        return {
+            "success": success,
+            "error_count": err,
+            "final_code": f"// code err={err}",
+            "fix_attempts": 0,
+            "elapsed_seconds": 1.0,
+        }
+
+    # 场景1：首次成功 → 直接返回，saved_by_retry=False
+    calls = {"n": 0}
+
+    def fake_first_ok(*args, **kwargs):
+        calls["n"] += 1
+        return _final(True, 0), []
+
+    monkeypatch.setattr(rp, "run_pipeline", fake_first_ok)
+    final, _ = rp.run_pipeline_bestof("需求", rolls=3)
+    assert final["success"] is True
+    assert final["bestof_attempt"] == 1
+    assert final["bestof_saved_by_retry"] is False
+    assert calls["n"] == 1, "首个成功 roll 后不应继续跑"
+
+    # 场景2：首败次成 → 返回第二次，saved_by_retry=True
+    seq = [_final(False, 5), _final(True, 0)]
+    state = {"i": 0}
+
+    def fake_second_ok(*args, **kwargs):
+        r = seq[min(state["i"], len(seq) - 1)]
+        state["i"] += 1
+        return r, []
+
+    monkeypatch.setattr(rp, "run_pipeline", fake_second_ok)
+    final, _ = rp.run_pipeline_bestof("需求", rolls=3)
+    assert final["success"] is True
+    assert final["bestof_attempt"] == 2
+    assert final["bestof_saved_by_retry"] is True
+
+    # 场景3：全失败 → 返回错误数最少的 roll（err=2 < 9 < 7），success=False
+    seq2 = [_final(False, 9), _final(False, 7), _final(False, 2)]
+    state2 = {"i": 0}
+
+    def fake_all_fail(*args, **kwargs):
+        r = seq2[min(state2["i"], len(seq2) - 1)]
+        state2["i"] += 1
+        return r, []
+
+    monkeypatch.setattr(rp, "run_pipeline", fake_all_fail)
+    final, _ = rp.run_pipeline_bestof("需求", rolls=3)
+    assert final["success"] is False
+    assert final["error_count"] == 2, "应选错误数最少的 roll 做诊断"
+    assert final["bestof_attempt"] == 3
