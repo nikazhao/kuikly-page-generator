@@ -536,6 +536,8 @@ def test_drop_unbacked_api_claims():
     fake_cp = "/tmp/fake-classes.jar"
 
     # 场景1：classpath 有 + 编译 0 错误 → API 存在性指控丢弃，其他保留
+    # v5 反转：「应移除通配符导入」从"保留"改为"丢弃"——用例 5 实测 Kotlin 允许
+    # 通配与精确 import 并存（kotlinc 0 错误），该指控无编译佐证属假指控
     orig = n._find_kuikly_classpath
     n._find_kuikly_classpath = lambda: fake_cp
     try:
@@ -545,8 +547,7 @@ def test_drop_unbacked_api_claims():
             "第 17 行：import 与前面的具体 import 冲突，应移除通配符导入",
         ]
         kept = n._drop_unbacked_api_claims(llm_errors, [])
-        assert len(kept) == 1, f"应只剩 1 条非存在性指控，实际 {kept}"
-        assert "通配符" in kept[0]
+        assert len(kept) == 0, f"存在性指控（含应移除）应全部丢弃，实际 {kept}"
 
         # 场景2：classpath 无 → 不过滤，原样保留
         n._find_kuikly_classpath = lambda: ""
@@ -563,6 +564,10 @@ def test_drop_unbacked_api_claims():
         n._find_kuikly_classpath = orig
 
     # 场景4：正则覆盖 v8 假指控与全量跑暴露的「应为」形态（用例8：5 条 vfor 假指控）
+    # + v5 补「应移除」形态（用例5 通配符 import 假指控，单条逃过过滤）
+    # + v12 补「不能/可能为/可能导致/缺少/要求」形态（7 条漏网假指控，过滤已启用
+    #    但措辞不含正则词——全部与 jar 真值相反：vforLazy 三参 lambda probe29 已证、
+    #    acquireModule 单参 probe30 已证）
     v8_claims = [
         "asyncToNativeMethod 方法不存在于 Kuikly Module 基类中，应使用 callNativeMethod",
         "pagerData 属性不存在于 Pager 类中",
@@ -570,6 +575,17 @@ def test_drop_unbacked_api_claims():
         "Button 组件不支持 titleAttr 属性",
         "AlertDialog 组件不支持 clickActionButton 事件，应使用 buttonClick 事件",
         "第 55 行：vfor 语法错误，应为 vfor(ctx.hotTags) { tag -> ... }",
+        "第 23 行：import com.tencent.kuikly.core.views.* 与前面的具体 import 冲突，应移除通配符导入",
+        "第 27 行：data class ChatItemData 定义在文件顶层，但 Kuikly 要求所有数据类必须在 Page 类内部定义或使用 @Keep 注解",
+        "第 37 行：observableList 的泛型参数 ChatItemData 未在 Page 类内部定义，可能导致序列化问题",
+        "第 80 行：vforLazy 的第三个参数是 Int 类型，但 lambda 中声明了三个参数 (item, index, _)，实际 Kuikly 的 vforLazy 只支持两个参数 (item, index)",
+        "第 57 行：acquireModule 方法签名可能为 acquireModule<T>(name: String, clazz: Class<T>)，缺少第二个参数",
+        "第 59 行：requestGet 回调参数顺序可能为 (response, error) 而非 (response, success, error)",
+        "第 77 行：List 组件内部不能直接使用 vforLazy，vforLazy 应放在 View 或 Scroller 等容器组件上",
+        "第 5 行：import com.tencent.kuikly.core.base.Color 重复导入，第 8 行已导入 com.tencent.kuikly.core.views.* 包含 Color",
+        "第 10 行：import com.tencent.kuikly.core.module.Module 未使用",
+        "第 25 行：observable 声明格式正确，但变量名 refreshing 与内部函数 refreshing 冲突",
+        "第 47 行：parseChatList 方法返回 MutableList，但 chatList 是 observableList，应直接赋值或使用 addAll",
     ]
     for c in v8_claims:
         assert n._API_CLAIM_RE.search(c), f"正则应命中: {c}"

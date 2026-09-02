@@ -278,6 +278,8 @@ KUIKLY_JAR_API_TRUTH = """
   `border(Border(1f, color = ...))` 会编译报错 no value passed for parameter 'lineStyle'；
   正确写法：`border(Border(1f, BorderStyle.SOLID, Color(0xFF4A90D9)))`
   （BorderStyle 枚举仅 SOLID / DOTTED / DASHED）
+- **Border 和 BorderStyle 都在 `com.tencent.kuikly.core.base` 包**
+  （~~com.tencent.kuikly.core.layout.BorderStyle~~ 路径不存在，javap 证实）
 - 页面尺寸：~~pageWidth / pageHeight~~ → `pagerData.pageViewWidth` / `pagerData.pageViewHeight`
 
 **Input 事件真名与取值（InputEvent / InputParams，javap 实测）**
@@ -308,18 +310,70 @@ KUIKLY_JAR_API_TRUTH = """
 - `Refresh { }` **只能写在 Scroller 内部**（扩展函数 receiver 是 ScrollerView），直接写在
   页面 body 会报 receiver mismatch
 - RefreshAttr 没有 `refreshing(...)` 方法，用**属性赋值** `refreshEnable = true`（不是函数调用）
+- RefreshAttr **只有 refreshEnable 一个自有属性**——~~color = ...~~（loading 圈颜色）无此 API，删掉
 - 事件：`refreshStateDidChange { state -> }`——~~onRefresh~~ 不存在；FooterRefresh 同名事件
+- **回调参数是 RefreshViewState 枚举**（IDLE / PULLING / REFRESHING），不是字符串 Map：
+  判断用 `state == RefreshViewState.REFRESHING`，~~params?.getString("state")~~ 编译报 unresolved
+  （枚举上没有 getString）；另有 `pullingPercentageChanged { f -> }`（Float 百分比）
+
+**attr 赋值形态：函数调用 vs 属性（真编译探针验证）**
+- attr 块里的方法**一律函数调用**：`backgroundColor(Color(0xFFF5F5F5))`——
+  写成 `backgroundColor = Color(...)` 编译报 "function invocation expected"
+- attr 中已知唯一属性赋值例外：Refresh 的 `refreshEnable = true`
+- ObservableList **整体更新不能重新赋值**：`chatList = newList.toMutableList()` 报
+  type mismatch（MutableList ≠ ObservableList）——用 `chatList.clear()` + `chatList.addAll(newList)`
 
 **NetworkModule（core 真实存在）**
 - import 路径：`com.tencent.kuikly.core.module.NetworkModule`（~~core.network.NetworkModule~~ 是错的）
 - `requestPost(url, JSONObject) { response, success, msg -> }` 三参 lambda 回调——
   **没有 Callback 类**，不要写 `object : Callback { ... }`
 - 方法族：requestGet / requestPost / httpRequest / requestGetBinary
+- **response 参数类型固定是非空 JSONObject**（javap 证实 Function3<JSONObject, Boolean, String>）：
+  ~~response is JSONArray~~ 编译报 "check for instance is always 'false'"；
+  ~~response != null~~ 恒 true（多余）；成功判断直接写 `if (success) { ... }`，response 直接用
+  （响应若是列表数据，取 JSONObject 里某字段再解析，不做顶层 is 类型检查）
+- 三参 requestGet/requestPost 已标 deprecated（仅 warning 不影响编译），
+  新四参重载末位多 NetworkResponse；继续用三参版可以
+- **params 参数是非空 JSONObject，不要传 null**（真编译探针验证）：
+  ~~requestGet(url, null, callback)~~ 报 "null cannot be a value of a non-null type
+  'JSONObject'" 且引发重载歧义 "none of the following candidates is applicable"；
+  传 `requestGet(url, JSONObject(), callback)`
+- **acquireModule/getModule 裸调只在 Pager 方法体（created()/自定义方法）里合法**；
+  在 event 回调（refreshStateDidChange/click 等）里隐式 receiver 不是 Pager，
+  必须显式 `ctx.acquireModule<T>(NetworkModule.MODULE_NAME)`，否则报
+  "cannot be called in this context with an implicit receiver"（真编译探针验证）
 
-**vfor 列表循环（真编译探针验证）**
+**JSON 解析 API 面（javap 实测，nvi.serialization.json）**
+- Kuikly 自带 JSONObject / JSONArray **全是 opt 系，没有 org.json 风格的 get 系**：
+  ~~getJSONObject(i)~~ / ~~getJSONArray(k)~~ / ~~getString(k)~~ 均不存在
+- JSONObject 可用：has / keySet / keys / length / opt / optBoolean / optDouble / optInt /
+  optJSONArray / optJSONObject / optLong / optString / put / toMap
+- JSONArray 可用：length / opt / optBoolean / optDouble / optInt / optJSONArray(int) /
+  optJSONObject(int) / optLong / optString(int) / put / remove / toList
+- 遍历数组对象：`for (i in 0 until jsonArray.length()) { val item = jsonArray.optJSONObject(i) ?: continue }`
+
+**列表数据源声明：直接 observableList 委托（真编译探针验证）**
+- ✅ `private var chatList by observableList<ChatItemData>()`
+- ❌ `by observable(observableList<ChatItemData>())` **双重包装**——类型崩坏，
+  chatList.clear()/addAll() unresolved，vfor item 类型推断失败，整页级联报错
+
+**padding 变体（真编译探针验证）**
+- ~~paddingHorizontal(...)~~ / ~~paddingVertical(...)~~ 不存在；
+  用四参 `padding(left, top, right, bottom)` 或单参 `padding(f)` / paddingTop / paddingBottom
+
+**vfor / vforLazy 循环（javap 签名 + 真编译探针验证）**
 - 数据必须包在圆括号 lambda：`vfor({ ctx.itemList }) { item -> ... }`——
   ~~vfor(ctx.itemList)~~ 直传编译不过
-- 数据源属性用 `by observableList<T>()`（import com.tencent.kuikly.core.reactive.handler.observableList）
+- **`vfor` 用在任意容器（View/Div/Scroller 等 ViewContainer）里，两参 lambda**：
+  `vfor({ ctx.chatList }) { item -> ... }`（receiver LoopDirectivesView 隐式，lambda 里 item 可直接访问）
+- **`vforLazy` 只能用在 ListView 家族（List/PageList/WaterFallList）内部**——
+  receiver 是 ListView，~~写在 View/Div 里~~报 cannot infer type parameter 'T' 全页级联；
+  三参 lambda：`vforLazy({ ctx.chatList }) { item, index, _ -> ... }`（item, index, count）
+- 两者数据源都是 `() -> ObservableList<T>`：数据属性用
+  `by observableList<T>()`（import com.tencent.kuikly.core.reactive.handler.observableList）
+- 循环 import：`import com.tencent.kuikly.core.directives.vfor` /
+  `import com.tencent.kuikly.core.directives.vforLazy`
+- body() 里先 `val ctx = this` 再用 ctx 引用 Pager 成员（chatList/refreshing 等）
 
 **进度条（core 无 ProgressBar 组件）**
 - jar 里没有任何 ProgressBar——进度条自己拼：外层 View 圆角背景色 + 内层 View 按百分比宽度
@@ -327,8 +381,10 @@ KUIKLY_JAR_API_TRUTH = """
 **Module 与 padding**
 - 自定义 Module 直接定义方法即可，`Module` 基类没有 callNativeMethod
 - `acquireModule<T>()` 编译器按可空处理，调用其方法时注意空安全（`?.`）
-- paddingLeft/paddingRight 标识符虽在 jar 中，但未在布局 attr 签名证实——**避免使用**，
-  用 `padding(Float)` 或 `paddingTop/paddingBottom` 等已证实方法
+- paddingLeft/paddingRight **在 ContainerAttr（View/Div 等容器 attr）真实可用**
+  （javap 证实 7 个 padding 重载全在 ContainerAttr：四参/单参/Top/Bottom/Left/Right）；
+  但 **Input/Text 的 attr 不能写任何 padding**（InputAttr/TextAttr 直接继承 Attr
+  不经 ContainerAttr，全量 v5 用例8 根因）
 
 **Button（compose 包）真实形态（javap + 真编译探针验证）**
 - 按钮文字与文字样式写在 `titleAttr { }` 子作用域（TextAttr），不是 Button attr 顶层：
@@ -368,6 +424,53 @@ KUIKLY_JAR_API_TRUTH = """
   }
   ```
 - 单写 `vif({ 条件 })` 不带内容块会编译报错（缺 content 参数）
+
+**事件必须写在 event { } 块内（真编译探针验证）**
+- Kuikly 组件结构三件套：`attr { }`（属性）/ `event { }`（事件）/ 花括号内容块（子组件）
+- 事件函数（click / touchDown / textDidChange / refreshStateDidChange / switchOnChanged 等）
+  **只能写在 `event { }` 块内**（receiver 是 Event 类）——裸写在组件 body 层会报
+  unresolved reference（body 的 receiver 是 ViewContainer，没有这些事件方法）：
+  ```kotlin
+  Refresh {
+      attr { refreshEnable = true }
+      event { refreshStateDidChange { state -> ... } }   // ✅
+  }
+  ```
+
+**Text 行数与行尾（javap 实测，chatlist 用例根因）**
+- 限行数：~~maxLines(1)~~ 不存在 → 用 `lines(1)`（TextAttr.lines(int)，javap 证实）
+- ~~lineBreakMode(...)~~ 与 ~~LineBreakMode~~ 枚举**均不存在**（jar 0 匹配）——
+  行尾省略模式无此 API，直接不写（lines 限行后超出部分默认截断）
+
+**TextAttr 方法边界（javap 全量 + 真编译实测）**
+- 文字对齐只有三个：`textAlignLeft()` / `textAlignCenter()` / `textAlignRight()`——
+  ~~textAlignEnd()~~ **不存在**（右对齐用 textAlignRight，全量 v3 用例5 根因）
+- 文字样式可用：text / value / color(long|Color) / fontSize(f) /
+  fontWeightBold/Medium/Normal/Light/SemiBold/Black 等（**函数调用形态**，
+  不是 fontWeight = X 赋值）/ fontFamily / lines(int) / lineHeight(f) /
+  textOverFlowTail()/Clip()/Middle()/WordWrapping() / textDecorationUnderLine()/LineThrough()
+- **TextAttr 不能写 padding**：TextAttr 直接继承 Attr 不经过 ContainerAttr
+  （padding 只在 View/Div 等容器 attr，全量 v4 用例8 根因）；margin 可以
+  （TextAttr implements ILayoutAttr）。要给文字加内边距，包一层 View 写在 View 的 attr 里
+
+**绝对定位（javap + 真编译探针验证）**
+- 枚举名是 `FlexPositionType`（com.tencent.kuikly.core.layout 包），
+  值 RELATIVE / ABSOLUTE——~~PositionType~~ 不存在（全量 v4 用例4 根因）
+- 用法：`positionType(FlexPositionType.ABSOLUTE)` + `top(f)` / `left(f)` / `right(f)` / `bottom(f)`
+- import：`com.tencent.kuikly.core.layout.FlexPositionType`
+
+**协程与定时器（真编译探针验证）**
+- **kotlinx.coroutines 全套不可用**（Job / MainScope / delay / launch / CoroutineScope
+  全部 unresolved——Kuikly core 不带协程依赖，全量 v4 用例6 根因）；异步用
+  Module 回调 / event 回调即可，不要写协程
+- 延迟执行用 `setTimeout(1000) { ... }`（毫秒）——
+  import `com.tencent.kuikly.core.timer.setTimeout`
+
+**事件方法面（javap Event 类全量 + 真编译探针验证）**
+- Event 类手势/点击事件全集：`click(ClickParams)` / `doubleClick(ClickParams)` /
+  **`longPress(LongPressParams)`** / `pan(PanGestureParams)` / `pinch(PinchGestureParams)` /
+  `animationCompletion(...)`——~~longClick~~ **不存在**，长按用 longPress
+  （全量 v5 用例5 根因）
 """
 
 

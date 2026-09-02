@@ -230,12 +230,15 @@ def _merge_imports(code: str, imports: list[str]) -> str:
 
 
 def _dedupe_class_imports(code: str) -> str:
-    """同名类被 import 到多个路径时只保留一个（确定性修复，不依赖 LLM）。
+    """同名类被 import 到多个路径时只保留一个；白名单类路径写错时强制纠正（确定性，不依赖 LLM）。
 
     用例4 实测：LLM 组装写了 `import com.tencent.kuikly.core.views.Center`（错误
     路径），确定性注入又补了 `import com.tencent.kuikly.core.views.layout.Center`
     （正确路径）→ 同名类双路径共存，LLM 自审反复报「重复导入冲突」且 auto_fix
     无法收敛。按简单类名分组，保留白名单优选路径，其余整行删除。
+    用例5 v8 实测补充：白名单类只出现一条错误路径 import 时原逻辑不动（漏）——
+    现在「唯一路径与白名单不符 → 整行替换为白名单路径」（BorderStyle 被写成
+    layout 包，javap 证实全库唯一真路径是 base，无同名歧义，纠错语义安全）。
     通配 import（`.*`）不参与去重（Kotlin 允许通配与精确并存，不构成同名冲突）。
     """
     if "import " not in code:
@@ -244,6 +247,13 @@ def _dedupe_class_imports(code: str) -> str:
     _PREFERRED = {
         "Center": "com.tencent.kuikly.core.views.layout",
         "Button": "com.tencent.kuikly.core.views.compose",
+        # v8 实测：BorderStyle 被写成 layout 包（全库唯一真路径是 base，javap 证实，
+        # 无同名歧义 → 白名单纠错语义安全）
+        "BorderStyle": "com.tencent.kuikly.core.base",
+        # 全量 v3 实测：LLM 写 views.compose.Border（该包无此类，import 行 unresolved
+        # 遮蔽 base.Border 使用处）+ _infer_imports 注入 base.Border → 双路径并存，
+        # 白名单挑 base（全量 v3 用例1 修 3 轮就卡在这）
+        "Border": "com.tencent.kuikly.core.base",
     }
     lines = code.split("\n")
     by_name: dict[str, list[tuple[int, str, str]]] = {}  # 类名 -> [(行号, 全路径, 包名)]
@@ -257,24 +267,34 @@ def _dedupe_class_imports(code: str) -> str:
         pkg, name = path.rsplit(".", 1)
         by_name.setdefault(name, []).append((i, path, pkg))
     drop_idx = set()
-    for entries in by_name.values():
+    replace_idx: dict[int, str] = {}  # 行号 -> 替换后的整行（白名单纠错唯一错误路径）
+    for name, entries in by_name.items():
+        preferred_pkg = _PREFERRED.get(name)
+        if preferred_pkg:
+            if any(e[2] == preferred_pkg for e in entries):
+                # 白名单路径已在：删掉其余错误路径（原去重行为）
+                for e in entries:
+                    if e[2] != preferred_pkg:
+                        drop_idx.add(e[0])
+            else:
+                # 唯一路径就是错的：整行替换为白名单路径（v8 实测漏场景）
+                replace_idx[entries[0][0]] = f"import {preferred_pkg}.{name}"
+                for e in entries[1:]:
+                    drop_idx.add(e[0])
+            continue
         if len(entries) <= 1:
             continue
-        preferred_pkg = _PREFERRED.get(entries[0][1].rsplit(".", 1)[1])
-        keep = None
-        if preferred_pkg:
-            for e in entries:
-                if e[2] == preferred_pkg:
-                    keep = e
-                    break
-        if keep is None:
-            keep = entries[0]
+        keep = entries[0]
         for e in entries:
             if e is not keep:
                 drop_idx.add(e[0])
-    if not drop_idx:
+    if not drop_idx and not replace_idx:
         return code
-    return "\n".join(ln for i, ln in enumerate(lines) if i not in drop_idx)
+    return "\n".join(
+        replace_idx.get(i, ln)
+        for i, ln in enumerate(lines)
+        if i not in drop_idx
+    )
 
 
 def _infer_imports(code: str) -> list[str]:
@@ -344,7 +364,10 @@ def _infer_imports(code: str) -> list[str]:
 # ═══════════════════════════════════════════════════════════════
 # 节点⑤：编译检查（规则 + LLM 双重检查）
 # ═══════════════════════════════════════════════════════════════
-_API_CLAIM_RE = re.compile(r"不存在|不支持|应使用|应改用|应为|并非|并没有")
+_API_CLAIM_RE = re.compile(
+    r"不存在|不支持|不能|只支持|应使用|应改用|应为|应移除|应直接|并非|并没有"
+    r"|可能为|可能导致|缺少|要求|重复导入|冲突|未使用|未定义"
+)
 
 
 def _drop_unbacked_api_claims(llm_errors: list[str], rule_errors: list[str]) -> list[str]:
@@ -355,12 +378,24 @@ def _drop_unbacked_api_claims(llm_errors: list[str], rule_errors: list[str]) -> 
     旧知识把这些正确 API 指控为「不存在」——但同一份代码 kotlinc 真编译 0 错误。
     API 真假编译器是唯一权威：真编译 0 错误时，存在性断言类指控必为假。非真编译
     口径（无 classpath）或 kotlinc 本身报错时不启用，保持原行为。
+    v5 补「应移除」：用例 5 实测剩 1 条「import 通配符与具体 import 冲突，应移除」
+    ——Kotlin 允许通配与精确 import 并存（_dedupe_class_imports 注释自证），kotlinc
+    0 错误下该指控无佐证，属同一类存在性断言假指控（旧测试把它当非存在性保留，
+    实测证伪后反转）。
     """
     if not _find_kuikly_classpath():
         return llm_errors
     if any(".kt:" in e and ": error:" in e for e in rule_errors):
         return llm_errors  # 编译器自己报错，无法作为「代码合法」的权威
-    kept = [e for e in llm_errors if not _API_CLAIM_RE.search(e)]
+    # 先去重：审查器偶发同一条指控刷屏数百次（full v6 用例5 实测 917 条），
+    # 不去重即使大部分被正则过滤，漏网形态也会刷屏把 fixer 打崩
+    seen: set[str] = set()
+    deduped = []
+    for e in llm_errors:
+        if e not in seen:
+            seen.add(e)
+            deduped.append(e)
+    kept = [e for e in deduped if not _API_CLAIM_RE.search(e)]
     dropped = len(llm_errors) - len(kept)
     if dropped:
         print(f"  [过滤] 真编译 0 错误，丢弃 {dropped} 条无编译佐证的 API 存在性指控")
