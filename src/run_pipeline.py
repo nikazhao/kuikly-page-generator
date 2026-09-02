@@ -80,6 +80,7 @@ def run_pipeline_bestof(
     page_name: str = "",
     rolls: int = 3,
     recursion_limit: int = 30,
+    collect_steps: bool = False,
 ) -> tuple[dict, list[dict]]:
     """Best-of-N 采样：循环跑流水线，首个 success 即返回；全失败返回错误数最少的 roll。
 
@@ -92,11 +93,12 @@ def run_pipeline_bestof(
     后续 roll 只在失败时才花）；最坏 rolls×单次耗时。
     返回的 final 额外带：bestof_attempt（成功/选中的 roll 序号，1-based）、
     bestof_rolls（总 roll 上限）、bestof_saved_by_retry（是否靠重试救回）。
+    collect_steps 透传给 run_pipeline（True 时收集每步 state 快照，供 UI 时间线）。
     """
     best: tuple[dict, list[dict]] | None = None
     for attempt in range(1, max(1, rolls) + 1):
         final, steps = run_pipeline(
-            user_requirement, page_name=page_name, collect_steps=False,
+            user_requirement, page_name=page_name, collect_steps=collect_steps,
             recursion_limit=recursion_limit,
         )
         final = dict(final)

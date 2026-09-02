@@ -25,7 +25,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 import streamlit as st
-from src.run_pipeline import run_pipeline, truncate_field
+from src.run_pipeline import run_pipeline_bestof, truncate_field
 
 
 # 时间线里要展示的状态字段（长代码字段单独截断）
@@ -97,9 +97,11 @@ def main() -> None:
         st.error("请先输入需求描述。")
         return
 
-    with st.spinner("正在通过 Graph 流水线生成页面…"):
+    with st.spinner("正在通过 Graph 流水线生成页面（Best-of-3 采样）…"):
         try:
-            final, steps = run_pipeline(requirement, page_name=page_name, collect_steps=True)
+            final, steps = run_pipeline_bestof(
+                requirement, page_name=page_name, rolls=3, collect_steps=True
+            )
         except Exception as exc:  # noqa: BLE001 — UI 层兜底，不让异常崩掉页面
             st.error(f"生成失败：{exc}")
             return
@@ -117,6 +119,12 @@ def main() -> None:
     col1.metric("状态", "成功 ✅" if success else "未完成 ⚠️")
     col2.metric("耗时", f"{elapsed}s")
     col3.metric("修正次数", final.get("fix_attempts", 0))
+
+    if final.get("bestof_rolls"):
+        tag = f"第 {final.get('bestof_attempt', 1)}/{final['bestof_rolls']} 次采样"
+        if final.get("bestof_saved_by_retry"):
+            tag += "（前次未通过，重试救回）"
+        st.caption(f"Best-of-N：{tag}")
 
     if code:
         st.subheader(f"生成代码：{final.get('page_name', 'GeneratedPage')}.kt")
