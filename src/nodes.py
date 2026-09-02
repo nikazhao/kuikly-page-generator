@@ -356,11 +356,20 @@ def node_compile_check(state: Dict[str, Any]) -> Dict[str, Any]:
     rule_errors = _rule_check(code)
 
     # LLM 检查（深）
-    prompt = fill_prompt(get_prompt("compile_check"), code=code)
+    # 注入 API 参考：指控纪律要求"API 类指控须有参考印证"，审查器手里必须先有参考。
+    # （用例8实测：审查器无据断言 pagerData / Input / core.pager.Pager 不存在，
+    # 而这三条恰恰是知识源里的真实 API，假指控把 3 次修正额度全部耗光）
+    prompt = fill_prompt(get_prompt("compile_check"), code=code,
+                         api_reference=get_kuikly_api_reference())
     llm_result = call_llm_json(_get_llm(), prompt)
 
-    errors = rule_errors + llm_result.get("errors", [])
-    passed = len(errors) == 0 and llm_result.get("passed", True)
+    llm_errors = llm_result.get("errors", [])
+    # 防御：审查器给 passed=false 却列不出任何问题 → 无据可修，视为通过。
+    # 否则 auto_fix 会拿着空问题列表空转，白烧 3 次修正额度（prompt 的指控
+    # 纪律要求"passed=true 当且仅当 errors 为空"，这里是同一纪律的确定性兜底）。
+    llm_passed = llm_result.get("passed", True) if llm_errors else True
+    errors = rule_errors + llm_errors
+    passed = len(errors) == 0 and llm_passed
 
     print(f"  规则检查: {len(rule_errors)} 问题")
     print(f"  LLM 检查: {'PASS' if llm_result.get('passed') else 'FAIL'}")
@@ -487,6 +496,20 @@ def _kotlinc_syntax_errors(code: str) -> list[str]:
     return _kotlinc_compile_errors(code, classpath=None)
 
 
+# 结构层规则的固定文案（_rule_check 产出与 _annotate_error_source 识别共用同一常量，
+# 避免用前缀猜来源时把 LLM 指控里的"缺少 xxx"误判成结构规则——用例2家族的混排问题）
+_RULE_MISSING_PAGE = "缺少 @Page 注解"
+_RULE_MISSING_PAGER = "未继承 Pager() 或 BasePager()"
+_RULE_MISSING_BODY = "缺少 body() 方法重写"
+_RULE_MISSING_VIEWBUILDER = "缺少 ViewBuilder 返回类型"
+_RULE_MISSING_PACKAGE = "缺少 package 声明"
+_RULE_BRACE_MISMATCH = "大括号不匹配"
+_RULE_PAREN_MISMATCH = "圆括号不匹配"
+_STRUCTURAL_RULES = (_RULE_MISSING_PAGE, _RULE_MISSING_PAGER, _RULE_MISSING_BODY,
+                     _RULE_MISSING_VIEWBUILDER, _RULE_MISSING_PACKAGE,
+                     _RULE_BRACE_MISMATCH, _RULE_PAREN_MISMATCH)
+
+
 def _rule_check(code: str) -> list[str]:
     """基于规则的编译检查：优先 kotlinc 真语法/真编译校验，不可用时降级括号匹配。
 
@@ -503,22 +526,39 @@ def _rule_check(code: str) -> list[str]:
     else:
         # kotlinc 不可用时的降级：括号匹配
         if code.count("{") != code.count("}"):
-            errors.append(f"大括号不匹配: {{={code.count('{')}, }}={code.count('}')}")
+            errors.append(f"{_RULE_BRACE_MISMATCH}: {{={code.count('{')}, }}={code.count('}')}")
         if code.count("(") != code.count(")"):
-            errors.append(f"圆括号不匹配: (={code.count('(')}, )={code.count(')')}")
+            errors.append(f"{_RULE_PAREN_MISMATCH}: (={code.count('(')}, )={code.count(')')}")
 
     # ② 结构层规则（与 classpath 无关，始终检查）
     if "@Page(" not in code:
-        errors.append("缺少 @Page 注解")
+        errors.append(_RULE_MISSING_PAGE)
     if ": Pager()" not in code and ": BasePager()" not in code:
-        errors.append("未继承 Pager() 或 BasePager()")
+        errors.append(_RULE_MISSING_PAGER)
     if "override fun body()" not in code:
-        errors.append("缺少 body() 方法重写")
+        errors.append(_RULE_MISSING_BODY)
     if "ViewBuilder" not in code:
-        errors.append("缺少 ViewBuilder 返回类型")
+        errors.append(_RULE_MISSING_VIEWBUILDER)
     if not code.strip().startswith("package "):
-        errors.append("缺少 package 声明")
+        errors.append(_RULE_MISSING_PACKAGE)
     return errors
+
+
+def _annotate_error_source(e: str) -> str:
+    """给编译错误标注来源，供 auto_fix 决定修复优先级（用例2实测）。
+
+    用例2 全量跑失败时 17 个问题 = 2 个 kotlinc 真错误 + 15 条 LLM 自审指控，
+    真假混排导致修复器被假指控牵制、真错误反而没修掉。标注后修复器可执行
+    「确定性结果优先修、AI 审查先核实」的纪律。判定依据：
+    - kotlinc 行特征：含 ".kt:" 与 ": error:"（临时文件路径 + 编译器报错格式）；
+    - 结构规则：与 _STRUCTURAL_RULES 常量精确匹配（_rule_check 的固定文案）；
+    - 其余（自由文本）一律视为 LLM 自审意见。
+    """
+    if ".kt:" in e and ": error:" in e:
+        return f"[编译器] {e}"
+    if e.startswith(_STRUCTURAL_RULES):
+        return f"[结构规则] {e}"
+    return f"[AI自审] {e}"
 
 
 def verify_compile(code: str) -> dict:
@@ -570,7 +610,9 @@ def node_auto_fix(state: Dict[str, Any]) -> Dict[str, Any]:
     prompt = fill_prompt(
         get_prompt("auto_fix"),
         code=code,
-        errors="\n".join(f"- {e}" for e in errors),
+        # 逐条标注来源（[编译器]/[结构规则]/[AI自审]），配合 prompt 里的
+        # 修复纪律：确定性结果优先修、AI 审查先核实再改（用例2实测）。
+        errors="\n".join(f"- {_annotate_error_source(e)}" for e in errors),
         fix_attempts=fix_attempts - 1,
         api_reference=get_kuikly_api_reference(),
     )

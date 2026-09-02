@@ -315,6 +315,56 @@ def test_kuikly_compliance_bad_code():
 
 
 # ──────────────────────────────────────────────────────────────
+# 自审证据纪律（用例2实测：真假指控混排耗尽修正次数导致不收敛）
+# ──────────────────────────────────────────────────────────────
+def test_annotate_error_source():
+    """错误来源标注必须三分辨：kotlinc 行 / 结构规则 / LLM 自审。"""
+    from src.nodes import _annotate_error_source
+    kotlinc = "/tmp/xx.kt:127:77: error: no parameter with name 'isOn' found."
+    assert _annotate_error_source(kotlinc).startswith("[编译器]")
+    assert _annotate_error_source("缺少 @Page 注解").startswith("[结构规则]")
+    # LLM 自审的"缺少 xxx"不能因开头撞词被误判成结构规则
+    assert _annotate_error_source("缺少背景色设置，建议补充").startswith("[AI自审]")
+    assert _annotate_error_source("第 72 行：attr 块中 flexDirectionRow() 方法不存在").startswith("[AI自审]")
+
+
+def test_compile_check_unbacked_fail_passes():
+    """审查器给 passed=false 却列不出任何问题 → 无据可修，应视为通过。
+
+    用例2家族漏洞：LLM 自审软判 fail 但 errors 为空时，auto_fix 会拿空
+    问题列表空转，白烧 3 次修正额度导致整页失败。
+    """
+    import src.nodes as n
+
+    code = '''package com.tencent.kuikly.demo.pages
+
+import com.tencent.kuikly.core.annotations.Page
+import com.tencent.kuikly.core.pager.Pager
+
+@Page("T")
+internal class T : Pager() {
+    override fun body(): ViewBuilder {
+        return { }
+    }
+}'''
+    orig_rule = n._rule_check
+    orig_json = n.call_llm_json
+    orig_llm = n._get_llm
+    n._rule_check = lambda c: []
+    n._get_llm = lambda: object()
+    n.call_llm_json = lambda llm, prompt: {"passed": False, "errors": [], "warnings": ["整体感觉不佳"]}
+    try:
+        state = n.node_compile_check({"assembled_code": code})
+    finally:
+        n._rule_check = orig_rule
+        n.call_llm_json = orig_json
+        n._get_llm = orig_llm
+    assert state["compile_passed"] is True, "无据软判 fail 不应挡住快乐路径"
+    assert state["error_count"] == 0
+    assert state["final_code"], "通过时必须落盘最终代码"
+
+
+# ──────────────────────────────────────────────────────────────
 # 路 B：组件白名单 + Module 知识 + 真编译验证
 # ──────────────────────────────────────────────────────────────
 def test_component_whitelist_text():
