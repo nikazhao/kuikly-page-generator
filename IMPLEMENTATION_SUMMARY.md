@@ -31,13 +31,20 @@ Kuikly 是腾讯自研的跨平台 UI 框架，使用 Kotlin DSL 编写页面。
 ### 1.3 已验证成果
 
 - ✅ 6 节点 Graph 全链路跑通（线性 / Fan-out 并行 / Fan-in 汇总 / 条件循环）
-- ✅ **15/15 单元测试通过**（含 Pydantic 强类型校验、kotlinc 噪声过滤等新增测试）
+- ✅ **30/30 单元测试通过**（含 Pydantic 强类型校验、kotlinc 噪声过滤、重试、确定性符合度评分、组件白名单、Module 知识、信号传导等）
 - ✅ CodeBuddy API（deepseek-v3）作为 LLM 后端稳定可用
 - ✅ State 从 TypedDict 升级为 **Pydantic BaseModel**（Phase 2.2，节点交接自动校验类型）
 - ✅ 编译检查从「括号匹配 + LLM 模拟」升级为 **kotlinc 真实语法校验 + classpath 噪声过滤**（Phase 3 ①）
 - ✅ 领域知识从手写静态 API 表升级为 **官方 `KuiklyUI-AI` 规则动态检索**（Phase 1.1）
 - ✅ 新增 `--trace` 可观测模式：实时打印每步 state 快照
 - ✅ 实测：登录页生成耗时 ~48s，自动修正 1 次后编译检查通过
+- ✅ **LLM 调用指数退避重试**（P0①，限流/超时自动重试，非瞬态错误直接抛）
+- ✅ **确定性规则符合度评分**（P0②，`_kuikly_compliance`，不依赖 LLM 自审，供 eval/CI）
+- ✅ **系统能力 Module 机制知识源**（路 B①，`KUIKLY_MODULE_REFERENCE`：SharedPreferencesModule 持久化 + 自定义 Module 音频/震动 + 反幻觉警告）
+- ✅ **官方组件白名单 28 个**（路 B②，`KUIKLY_COMPONENT_WHITELIST`，含 Button/Center 的精确 import 坑位）
+- ✅ **kotlinc 三档编译验证**（路 B③：纯语法 / 真编译 `KUIKLY_CLASSPATH` / Gradle 完整编译）
+- ✅ **本地 CI 质量门禁**（P1③，`ci/quality_gate.py`：pytest + eval 符合度阈值 + 编译档位报告）
+- ✅ **实测「电子木鱼」一次生成完整页面**（点击→音效 `asyncToNativeMethod` + 震动 + 功德计数 + `SharedPreferencesModule` 持久化），幻觉 API 清零
 
 ---
 
@@ -394,12 +401,22 @@ def _is_classpath_noise(line: str) -> bool:
         "no value passed for parameter", # 形参缺失
         "overload resolution ambiguity", # 重载歧义
         "unresolved type",               # 未解析的类型名
+        # 继承/override 连锁噪声（基类不在 classpath 时的误报，路 B③ 新增）：
+        "this type is final",            # 继承无法解析的基类被误报为 final
+        "none of the following candidates",  # 构造函数无法解析
+        "overrides nothing",             # override 的方法在无法解析的基类中找不到
     )
     low = line.lower()
     return any(n in low for n in _CLASSPATH_NOISE)
 ```
 
 **效果**：真语法错误（如 `syntax error: Expecting '}'`）被保留；classpath 缺失导致的误报全部过滤掉。
+
+> **三档编译校验（路 B③）**：噪声过滤只在「第①档纯语法」时生效。若配置了
+> `KUIKLY_CLASSPATH` 环境变量指向 Kuikly core 产物，则升级「第②档真编译」——
+> 此时 `unresolved reference` 是**真错误**（说明 import 写错包名/组件名不存在），
+> **不再当噪声过滤**，从而拦住「猜 import」骗过校验（木鱼实测暴露的问题）。
+> 第③档（Gradle 完整编译）需 gradle 环境，入口见 `ci/` 门禁脚本注释。
 
 ### 7.3 第二层：结构规则检查（始终生效）
 
@@ -488,10 +505,14 @@ Graph/
 │   ├── main.py                   # CLI 入口（单条/批量/交互/trace 模式）
 │   ├── graph.py                  # Graph 拓扑组装（add_node + add_edge）
 │   ├── state.py                  # State 数据结构定义（Pydantic BaseModel）
-│   ├── nodes.py                  # 8 个节点函数 + 路由 + kotlinc 校验 + 噪声过滤
-│   ├── prompts.py                # 各节点 Prompt 模板 + API 速查表 + Few-shot 加载
-│   ├── llm.py                    # LLM 调用封装（多后端 + 流式兼容 + JSON 解析）
-│   └── retriever.py              # 官方 KuiklyUI-AI 规则检索（Phase 1.1 新增）
+│   ├── nodes.py                  # 节点函数 + 路由 + kotlinc 三档校验 + 噪声过滤 + 符合度评分
+│   ├── prompts.py                # Prompt 模板 + API 速查 + Module 参考 + 组件白名单 + Few-shot
+│   ├── llm.py                    # LLM 调用封装（多后端 + 流式兼容 + JSON 解析 + 重试）
+│   ├── retriever.py              # 官方 KuiklyUI-AI 规则检索（Phase 1.1 新增）
+│   └── run_pipeline.py           # 流水线封装（Web UI / eval / MCP 复用）
+│
+├── ci/                           # 本地质量门禁
+│   └── quality_gate.py           # P1③：pytest + eval 符合度阈值 + 编译档位报告
 │
 ├── knowledge/                    # 外部知识源（gitignore）
 │   └── KuiklyUI-AI/             # Tencent-TDS/KuiklyUI-AI 仓库（clone 自 GitHub）
@@ -504,10 +525,12 @@ Graph/
 │   ├── 02_event_and_module.kt
 │   ├── 03_state_display.kt
 │   ├── 04_settings_page.kt
-│   └── 05_login_page.kt
+│   ├── 05_login_page.kt
+│   ├── 06_audio_module.kt        # 路 B①：音频 + 震动自定义 Module 完整页
+│   └── 07_shared_prefs.kt        # 路 B①：SharedPreferencesModule 持久化页
 │
 ├── tests/                        # 测试
-│   ├── test_graph.py             # 单元测试（15 个）
+│   ├── test_graph.py             # 单元测试（30 个）
 │   ├── test_cases.json           # 标准测试用例（10 个）
 │   └── test_cases_extra.json     # 扩展测试用例
 │

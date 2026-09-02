@@ -163,6 +163,10 @@ def test_classpath_noise_filter():
     )
     assert _is_classpath_noise("/x.kt:10:10: error: type mismatch: ...")
     assert _is_classpath_noise("/x.kt:10:10: error: unresolved type: Foo")
+    # 继承/override 连锁噪声（基类不在 classpath 时的误报）
+    assert _is_classpath_noise("/x.kt:16:28: error: this type is final, so it cannot be extended.")
+    assert _is_classpath_noise("/x.kt:16:28: error: none of the following candidates is applicable:")
+    assert _is_classpath_noise("/x.kt:17:5: error: 'moduleName' overrides nothing.")
     # 真语法错误必须保留
     assert not _is_classpath_noise("/x.kt:6:6: error: syntax error: Expecting '}'.")
     assert not _is_classpath_noise("/x.kt:2:10: error: Expecting ')'.")
@@ -273,3 +277,163 @@ def test_kuikly_compliance_bad_code():
     res_empty = _kuikly_compliance("")
     assert res_empty["score"] == 0.0
     assert res_empty["hard_passed"] == 0
+
+
+# ──────────────────────────────────────────────────────────────
+# 路 B：组件白名单 + Module 知识 + 真编译验证
+# ──────────────────────────────────────────────────────────────
+def test_component_whitelist_text():
+    """组件白名单应非空，且标注 Button（compose 包）/ Center（layout 包）精确 import。"""
+    from src.prompts import _component_whitelist_text, KUIKLY_COMPONENT_WHITELIST
+    text = _component_whitelist_text()
+    assert len(KUIKLY_COMPONENT_WHITELIST) >= 20, "白名单应覆盖官方组件清单"
+    assert "com.tencent.kuikly.core.views.compose.Button" in text
+    assert "com.tencent.kuikly.core.views.layout.Center" in text
+    # 白名单里不应有木鱼实测时猜错的那类"不存在组件"（这里只抽查名字格式）
+    names = [n for n, _, _ in KUIKLY_COMPONENT_WHITELIST]
+    assert "View" in names and "Text" in names and "Button" in names
+
+
+def test_module_reference_loaded():
+    """Module 知识常量应包含持久化与音频/震动的真实 API。"""
+    from src.prompts import KUIKLY_MODULE_REFERENCE
+    # 持久化（内置 SharedPreferencesModule 真实方法）
+    assert "SharedPreferencesModule" in KUIKLY_MODULE_REFERENCE
+    assert "setInt" in KUIKLY_MODULE_REFERENCE and "getInt" in KUIKLY_MODULE_REFERENCE
+    # 音频/震动（自定义 Module 真实写法）
+    assert "asyncToNativeMethod" in KUIKLY_MODULE_REFERENCE
+    assert "createExternalModules" in KUIKLY_MODULE_REFERENCE
+    # 应明确提示"无内置音频/震动"，防止 LLM 臆造平台 API
+    assert "AudioHapticsModule" in KUIKLY_MODULE_REFERENCE
+
+
+def test_infer_imports_button_compose_pkg():
+    """Button 应推断到 compose 包（不是 views 包），这是木鱼猜错 import 的坑。"""
+    from src.nodes import _infer_imports
+    code = "Button { attr { text(\"ok\") } }"
+    imports = _infer_imports(code)
+    assert "com.tencent.kuikly.core.views.compose.Button" in imports
+    # 不应出现错误的 views 包 Button
+    assert "com.tencent.kuikly.core.views.Button" not in imports
+
+
+def test_infer_imports_module_classes():
+    """Module 相关类应推断出对应 import。"""
+    from src.nodes import _infer_imports
+    code = """
+class AudioHapticsModule : Module() {
+    override fun moduleName(): String = "KRAudioHapticsModule"
+    fun playSound(s: String) { asyncToNativeMethod("playSound", JSONObject().put("s", s), null) }
+}
+"""
+    imports = _infer_imports(code)
+    assert "com.tencent.kuikly.core.module.Module" in imports
+    assert "com.tencent.kuikly.core.nvi.serialization.json.JSONObject" in imports
+
+
+def test_find_kuikly_classpath_env():
+    """KUIKLY_CLASSPATH 环境变量应被识别；未设置时返回 None（降级纯语法）。"""
+    import importlib
+    import os
+    import src.nodes as nodes
+    importlib.reload(nodes)
+    # 未设置 → None
+    os.environ.pop("KUIKLY_CLASSPATH", None)
+    assert nodes._find_kuikly_classpath() is None
+    # 设置 → 返回该值
+    os.environ["KUIKLY_CLASSPATH"] = "/tmp/kuikly.jar"
+    assert nodes._find_kuikly_classpath() == "/tmp/kuikly.jar"
+    os.environ.pop("KUIKLY_CLASSPATH", None)
+
+
+def test_verify_compile_returns_mode():
+    """verify_compile 应返回 mode/classpath_used/errors 三字段。"""
+    import importlib
+    import os
+    import src.nodes as nodes
+    importlib.reload(nodes)
+    os.environ.pop("KUIKLY_CLASSPATH", None)
+    code = "package x\n@Page(\"A\")\nclass A : Pager() {\n override fun body(): ViewBuilder { return {} }\n}"
+    res = nodes.verify_compile(code)
+    assert res["mode"] in ("syntax", "unavailable", "full")
+    assert "classpath_used" in res
+    assert "errors" in res
+
+
+def test_examples_module_files_exist():
+    """路 B 新增的 few-shot 示例文件应存在。"""
+    examples_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples")
+    for f in ["06_audio_module.kt", "07_shared_prefs.kt"]:
+        assert os.path.exists(os.path.join(examples_dir, f)), f"缺少示例: {f}"
+
+
+# ──────────────────────────────────────────────────────────────
+# 路 B③ 修复：持久化信号传导 + 幻觉 API 补漏
+# ──────────────────────────────────────────────────────────────
+def test_decompose_gen_input_prompts_propagate_requirement():
+    """拆解/交互两个节点的 prompt 必须含 user_requirement 占位，
+    否则"要持久化"信号在拆解阶段就被截断，导致能力随机丢失（v3 实测暴露）。"""
+    from src.prompts import PROMPT_DECOMPOSE_PAGE, PROMPT_GEN_INPUT
+    assert "{user_requirement}" in PROMPT_DECOMPOSE_PAGE
+    assert "{user_requirement}" in PROMPT_GEN_INPUT
+    # 解析结论（含"含持久化/含音效"标注）也应传导，双保险
+    assert "{parsed_intent}" in PROMPT_DECOMPOSE_PAGE
+    assert "{parsed_intent}" in PROMPT_GEN_INPUT
+
+
+def test_hallucination_blacklist_covers_v3_residuals():
+    """幻觉 API 黑名单必须覆盖 v3 实测暴露的 onClick/textColor/ImageUri 三类。"""
+    from src.prompts import KUIKLY_API_REFERENCE
+    assert "onClick" in KUIKLY_API_REFERENCE
+    assert "textColor" in KUIKLY_API_REFERENCE
+    assert "base.attr.ImageUri" in KUIKLY_API_REFERENCE
+
+
+def test_infer_imports_image_uri_attr_pkg():
+    """ImageUri 应推断到 base.attr 包（v3 猜成了 views.ImageUri 是错的）。"""
+    from src.nodes import _infer_imports
+    imports = _infer_imports("Image { attr { src(ImageUri.pageAssets(\"a.png\")) } }")
+    assert "com.tencent.kuikly.core.base.attr.ImageUri" in imports
+
+
+def test_merge_imports_injects_missing_and_dedups():
+    """_merge_imports 应注入缺失 import、跳过已有、不插进 class 体。"""
+    from src.nodes import _merge_imports
+    code = """package com.tencent.kuikly.demo.pages
+
+import com.tencent.kuikly.core.annotations.Page
+import com.tencent.kuikly.core.pager.Pager
+
+@Page("A")
+internal class A : Pager() {
+    override fun body(): ViewBuilder { return {} }
+}"""
+    merged = _merge_imports(code, [
+        "com.tencent.kuikly.core.annotations.Page",  # 已存在，应跳过
+        "com.tencent.kuikly.core.base.attr.ImageUri",  # 缺失，应注入
+    ])
+    # 缺失项被注入
+    assert "import com.tencent.kuikly.core.base.attr.ImageUri" in merged
+    # 已有项不重复
+    assert merged.count("import com.tencent.kuikly.core.annotations.Page") == 1
+    # 注入位置在 package 与既有 import 之后、@Page 之前
+    assert merged.index("import com.tencent.kuikly.core.base.attr.ImageUri") < merged.index("@Page")
+    # 无 import 的代码原样返回
+    assert _merge_imports("just text", []) == "just text"
+
+
+def test_assemble_uses_deterministic_imports():
+    """组装节点必须调用 _merge_imports（不能只算 imports_needed 却不注入代码）。"""
+    import inspect
+    from src import nodes as n
+    src = inspect.getsource(n.node_assemble)
+    assert "_merge_imports(code, imports)" in src, "node_assemble 应把推断的 import 注入代码"
+
+
+def test_autofix_uses_deterministic_imports():
+    """自动修正节点也必须重注入 import（否则修正一次就丢 ImageUri 等 import）。"""
+    import inspect
+    from src import nodes as n
+    src = inspect.getsource(n.node_auto_fix)
+    assert "_infer_imports(fixed_code)" in src, "node_auto_fix 应重算 import"
+    assert "_merge_imports(fixed_code, imports)" in src, "node_auto_fix 应重注入 import"

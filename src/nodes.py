@@ -24,7 +24,8 @@ from typing import Dict, Any
 from .state import GraphState, initial_state, _state_values
 from .llm import get_llm, call_llm, call_llm_json
 from .prompts import (
-    fill_prompt, get_prompt, KUIKLY_API_REFERENCE, get_kuikly_api_reference, _load_example
+    fill_prompt, get_prompt, KUIKLY_API_REFERENCE, get_kuikly_api_reference, _load_example,
+    KUIKLY_MODULE_REFERENCE, _component_whitelist_text,
 )
 
 
@@ -53,6 +54,7 @@ def node_parse_requirement(state: Dict[str, Any]) -> Dict[str, Any]:
     prompt = fill_prompt(
         get_prompt("parse_requirement"),
         user_requirement=state["user_requirement"],
+        component_whitelist=_component_whitelist_text(),
     )
 
     result = call_llm_json(_get_llm(), prompt)
@@ -76,10 +78,13 @@ def node_decompose_page(state: Dict[str, Any]) -> Dict[str, Any]:
 
     prompt = fill_prompt(
         get_prompt("decompose_page"),
+        user_requirement=state.get("user_requirement", ""),
+        parsed_intent=state.get("parsed_intent", ""),
         page_name=state.get("page_name", "Page"),
         page_type=state.get("page_type", "other"),
         components_needed=", ".join(state.get("components_needed", [])),
         api_reference=get_kuikly_api_reference(),
+        module_reference=KUIKLY_MODULE_REFERENCE,
         example_border=_load_example("01_border_test.kt"),
         example_event=_load_example("02_event_and_module.kt"),
     )
@@ -123,8 +128,11 @@ def node_gen_input(state: Dict[str, Any]) -> Dict[str, Any]:
 
     prompt = fill_prompt(
         get_prompt("gen_input"),
+        user_requirement=state.get("user_requirement", ""),
+        parsed_intent=state.get("parsed_intent", ""),
         page_name=state.get("page_name", "Page"),
         input_plan=state.get("input_plan", ""),
+        module_reference=KUIKLY_MODULE_REFERENCE,
     )
 
     code = call_llm(_get_llm(), prompt)
@@ -175,40 +183,113 @@ def node_assemble(state: Dict[str, Any]) -> Dict[str, Any]:
         input_code=state.get("input_code", ""),
         style_code=state.get("style_code", ""),
         example_login=_load_example("05_login_page.kt"),
+        example_audio=_load_example("06_audio_module.kt"),
+        module_reference=KUIKLY_MODULE_REFERENCE,
     )
 
     code = call_llm(_get_llm(), prompt)
     code = _strip_markdown(code)  # 清洗 markdown 包装
 
-    # 推断 import
+    # 推断 import，并**确定性注入**缺失的 import（不能只算不用）。
+    # 木鱼 v4 实测：LLM 组装时漏了 ImageUri 的 import（代码用了 ImageUri.pageAssets
+    # 却没 import），第①档语法校验会把它当噪声放过，但真编译（第②档）会 unresolved
+    # reference。这里用 _infer_imports 的确定性结论补上，避免"猜 import 骗过校验"。
     imports = _infer_imports(code)
-    print(f"  组装完成: {len(code)} chars, {len(imports)} imports")
+    code = _merge_imports(code, imports)
+    print(f"  组装完成: {len(code)} chars, {len(imports)} imports（已注入缺失项）")
 
     return {"assembled_code": code.strip(), "imports_needed": imports}
 
 
+def _merge_imports(code: str, imports: list[str]) -> str:
+    """把 `_infer_imports` 推断的 import 合并进代码（只做加法：去重、跳过已有）。
+
+    插入点：package 声明与既有 import 区块之后（最后一个 package/import 行的下一行），
+    保证新 import 紧跟既有 import，不会插进 class 体或 @Page 注解前造成语法破坏。
+    已有 import 按整行字符串去重；`import {imp}` 已存在则跳过。
+    """
+    if not imports or not code.strip():
+        return code
+    lines = code.split("\n")
+    existing = {ln.strip() for ln in lines if ln.strip().startswith("import ")}
+    missing = [f"import {imp}" for imp in imports if f"import {imp}" not in existing]
+    if not missing:
+        return code
+
+    insert_at = None
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("package ") or s.startswith("import "):
+            insert_at = i + 1
+        elif s:  # 遇到第一个非空、非 package/import 的行（如 @Page / class），停止
+            break
+    if insert_at is None:
+        insert_at = 0
+    lines[insert_at:insert_at] = missing
+    return "\n".join(lines)
+
+
 def _infer_imports(code: str) -> list[str]:
-    """从代码中推断需要的 import 语句"""
+    """从代码中推断需要的 import 语句（含路 B 扩充的组件与 Module 类）。
+
+    注意：Button 在 `com.tencent.kuikly.core.views.compose` 包（不是 views 包），
+    Center 在 `views.layout` 包，均需精确推断，否则真编译时 unresolved reference。
+    """
     imports = []
     if "@Page" in code:
         imports.append("com.tencent.kuikly.core.annotations.Page")
-    if "Pager()" in code or "Pager()" in code:
+    if "Pager()" in code:
         imports.append("com.tencent.kuikly.core.pager.Pager")
     if "ViewBuilder" in code:
         imports.append("com.tencent.kuikly.core.base.ViewBuilder")
-    if "Color(" in code:
+    if "Color(" in code or "Color." in code:
         imports.append("com.tencent.kuikly.core.base.Color")
     if "Border(" in code:
         imports.append("com.tencent.kuikly.core.base.Border")
         imports.append("com.tencent.kuikly.core.base.BorderStyle")
     if "observable(" in code:
         imports.append("com.tencent.kuikly.core.reactive.handler.observable")
-    if "View {" in code or "Text {" in code or "Image {" in code:
-        imports.append("com.tencent.kuikly.core.views.*")
+
+    # ── 组件 import（精确路径） ──
+    # Button 在 compose 包，Center 在 layout 包，其余 views 组件用 views.* 通配兜底
+    if "Button {" in code or "Button(" in code:
+        imports.append("com.tencent.kuikly.core.views.compose.Button")
     if "Center {" in code:
         imports.append("com.tencent.kuikly.core.views.layout.Center")
-    if "Scroller {" in code:
-        imports.append("com.tencent.kuikly.core.views.Scroller")
+    _VIEWS_COMPONENTS = (
+        "View {", "Text {", "Image {", "Scroller {", "List {", "Modal {",
+        "Input {", "TextArea {", "RichText {", "Switch {", "CheckBox {",
+        "Slider {", "Tabs {", "AlertDialog {", "ActionSheet {", "DatePicker {",
+        "ScrollPicker {", "Refresh {", "FooterRefresh {", "PageList {",
+        "SliderPage {", "WaterFallList {", "Video {", "Canvas {", "Mask {",
+        "ActivityIndicator {",
+    )
+    if any(c in code for c in _VIEWS_COMPONENTS):
+        imports.append("com.tencent.kuikly.core.views.*")
+
+    # ── Module 相关 import ──
+    if "Module()" in code or ": Module" in code:
+        imports.append("com.tencent.kuikly.core.module.Module")
+    if "SharedPreferencesModule" in code:
+        imports.append("com.tencent.kuikly.core.module.SharedPreferencesModule")
+    if "RouterModule" in code:
+        imports.append("com.tencent.kuikly.core.module.RouterModule")
+    if "NotifyModule" in code:
+        imports.append("com.tencent.kuikly.core.module.NotifyModule")
+    if "MemoryCacheModule" in code:
+        imports.append("com.tencent.kuikly.core.module.MemoryCacheModule")
+    if "NetworkModule" in code:
+        imports.append("com.tencent.kuikly.core.module.NetworkModule")
+    if "acquireModule" in code or "getModule" in code or "asyncToNativeMethod" in code or "syncToNativeMethod" in code:
+        imports.append("com.tencent.kuikly.core.module.Module")
+    if "JSONObject" in code:
+        imports.append("com.tencent.kuikly.core.nvi.serialization.json.JSONObject")
+    if "CallbackFn" in code:
+        imports.append("com.tencent.kuikly.core.module.CallbackFn")
+    # ImageUri 在 base.attr 包（不是 views 包），需精确推断，否则 unresolved reference
+    if "ImageUri" in code:
+        imports.append("com.tencent.kuikly.core.base.attr.ImageUri")
+
     return list(dict.fromkeys(imports))  # 去重保序
 
 
@@ -271,19 +352,45 @@ def _is_classpath_noise(line: str) -> bool:
         "no value passed for parameter", # 形参缺失（接收者类型未知时误报）
         "overload resolution ambiguity", # 重载歧义（缺 Kuikly 重载信息）
         "unresolved type",               # 未解析的类型名（缺 Kuikly 类型）
+        # 继承/override 连锁噪声：代码继承 com.tencent.kuikly.* 的类（Pager/Module 等）时，
+        # 若基类无法解析，kotlinc 会连锁误报以下三类，根因都是"基类不在 classpath"：
+        "this type is final",            # 继承无法解析的基类，被误报为 final 不可继承
+        "none of the following candidates",  # 构造函数无法解析（基类缺失）
+        "overrides nothing",             # override 的方法在无法解析的基类中找不到
     )
     low = line.lower()
     return any(n in low for n in _CLASSPATH_NOISE)
 
 
-def _kotlinc_syntax_errors(code: str) -> list[str]:
-    """用 kotlinc 做真实 Kotlin 语法检查。
+def _find_kuikly_classpath() -> str | None:
+    """查找可选的 Kuikly classpath（路 B③ 第②档：真编译验证）。
 
-    说明：生成的代码引用了大量 com.tencent.kuikly.* 类，但本地没有 Kuikly
-    classpath，所以 kotlinc 会把"未解析的引用"也报成 error。这里只收集
-    **真实语法错误**（括号/关键字/结构错误），过滤掉 classpath 缺失导致的
-    类型/符号噪声（见 `_is_classpath_noise`），从而得到"真语法校验"而非"真编译"。
-    kotlinc 不可用时返回空列表，由调用方降级处理。
+    优先级：
+    1. 环境变量 `KUIKLY_CLASSPATH`（用户/CI 显式指定，指向 Kuikly core 编译产物
+       jar 或 classes 目录，多个路径用系统分隔符 `:` 或 `;` 连接）；
+    2. 本地常见路径探测（当前本机无 gradle/Kuikly 制品，暂留空，等有产物后扩展）。
+
+    找不到返回 None，调用方降级第①档纯语法校验。
+    """
+    env = os.getenv("KUIKLY_CLASSPATH", "").strip()
+    if env:
+        return env
+    return None
+
+
+def _kotlinc_compile_errors(code: str, classpath: str | None = None) -> list[str]:
+    """用 kotlinc 编译生成代码，返回真实 error 列表（路 B③ 第②档）。
+
+    分档行为：
+    - **第②档（classpath 非空）**：真编译。此时 `unresolved reference` 是**真错误**
+      （说明 import 写错包名 / 组件名不存在），**不再当噪声过滤**，直接保留，
+      从而拦住"猜 import"骗过校验的情况（木鱼实测暴露的问题）。
+    - **第①档（classpath 为空，降级）**：纯语法校验，过滤 classpath 缺失导致的
+      类型/符号噪声（见 `_is_classpath_noise`），只保留真语法错误。
+    - kotlinc 不可用：返回空列表，由调用方降级括号匹配。
+
+    第③档（Gradle 完整编译，含 Kuikly 全依赖 + 三端产物）需 gradle 环境，
+    不在 node 内执行，入口见 `ci/` 门禁脚本注释。
     """
     kotlinc = _kotlinc_path()
     if not kotlinc:
@@ -291,10 +398,13 @@ def _kotlinc_syntax_errors(code: str) -> list[str]:
     with tempfile.NamedTemporaryFile("w", suffix=".kt", delete=False, encoding="utf-8") as f:
         f.write(code)
         path = f.name
+    cmd = [kotlinc]
+    if classpath:
+        cmd += ["-classpath", classpath]
+    cmd += [path]
     try:
         proc = subprocess.run(
-            [kotlinc, path],
-            capture_output=True, text=True, timeout=60,
+            cmd, capture_output=True, text=True, timeout=120,
         )
     except (subprocess.TimeoutExpired, OSError):
         return []
@@ -309,22 +419,30 @@ def _kotlinc_syntax_errors(code: str) -> list[str]:
         # kotlinc 报错行形如 "xxx.kt:行号: error: 描述"
         if ": error:" not in line:
             continue
-        # 容忍 classpath 缺失导致的类型/符号噪声（非语法问题，交给 LLM 检查兜底）
-        if _is_classpath_noise(line):
+        # 有 classpath 时 unresolved reference 是 import 真错误，保留；
+        # 无 classpath 时是缺库噪声，过滤。
+        if classpath is None and _is_classpath_noise(line):
             continue
         errors.append(line.strip())
     return errors
 
 
+def _kotlinc_syntax_errors(code: str) -> list[str]:
+    """第①档：纯语法校验（无 classpath）。保留此函数以兼容既有调用。"""
+    return _kotlinc_compile_errors(code, classpath=None)
+
+
 def _rule_check(code: str) -> list[str]:
-    """基于规则的编译检查：优先 kotlinc 真语法校验，不可用时降级括号匹配。
+    """基于规则的编译检查：优先 kotlinc 真语法/真编译校验，不可用时降级括号匹配。
 
     结构类规则（@Page / Pager / body / package 等）与 classpath 无关，始终生效。
     """
     errors = []
 
-    # ① 语法层：优先用 kotlinc 做真实语法检查
-    syntax_errors = _kotlinc_syntax_errors(code)
+    # ① 语法层：优先 kotlinc。若配置了 KUIKLY_CLASSPATH 则走第②档真编译
+    #    （unresolved reference 保留为真错误），否则第①档纯语法（过滤噪声）。
+    classpath = _find_kuikly_classpath()
+    syntax_errors = _kotlinc_compile_errors(code, classpath=classpath)
     if syntax_errors:
         errors.extend(syntax_errors)
     else:
@@ -346,6 +464,30 @@ def _rule_check(code: str) -> list[str]:
     if not code.strip().startswith("package "):
         errors.append("缺少 package 声明")
     return errors
+
+
+def verify_compile(code: str) -> dict:
+    """独立编译验证入口（供 CI 质量门禁直接调用，不依赖 LLM）。
+
+    返回:
+        {
+          "mode": "full" | "syntax" | "unavailable",
+          "classpath_used": bool,
+          "errors": [str],
+        }
+    - "full"：配置了 KUIKLY_CLASSPATH，走了真编译（unresolved reference 为真错误）；
+    - "syntax"：无 classpath，走了纯语法校验（过滤缺库噪声）；
+    - "unavailable"：kotlinc 不可用。
+    """
+    classpath = _find_kuikly_classpath()
+    kotlinc = _kotlinc_path()
+    if not kotlinc:
+        return {"mode": "unavailable", "classpath_used": False, "errors": []}
+    if classpath:
+        return {"mode": "full", "classpath_used": True,
+                "errors": _kotlinc_compile_errors(code, classpath=classpath)}
+    return {"mode": "syntax", "classpath_used": False,
+            "errors": _kotlinc_compile_errors(code, classpath=None)}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -380,7 +522,11 @@ def node_auto_fix(state: Dict[str, Any]) -> Dict[str, Any]:
 
     fixed_code = call_llm(_get_llm(), prompt)
     fixed_code = _strip_markdown(fixed_code)
-    print(f"  修正完成: {len(fixed_code)} chars")
+    # 修正后同样补确定性 import：auto_fix 是 LLM 重写，可能再次漏写 import
+    # （如 ImageUri），须与 node_assemble 保持同一套注入逻辑，否则修正一次就丢 import。
+    imports = _infer_imports(fixed_code)
+    fixed_code = _merge_imports(fixed_code, imports)
+    print(f"  修正完成: {len(fixed_code)} chars（已注入缺失 import {len(imports)} 项）")
 
     return {
         "assembled_code": fixed_code.strip(),
