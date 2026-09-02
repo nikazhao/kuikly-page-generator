@@ -314,6 +314,18 @@ KUIKLY_JAR_API_TRUTH = """
 - Button 事件只有 `touchDown` / `touchUp` / `touchMove`（TouchParams），**没有 onClick**：
   `event { touchDown { ... } }`
 
+**AlertDialog 真实事件（javap 实测，无 confirm/cancel）**
+- 事件只有四个：`willDismiss { }` / `clickActionButton { index -> }` / `clickBackgroundMask { }` /
+  `alertDidExit { }`——~~confirm~~ / ~~cancel~~ 不存在
+- 按钮文字用 attr 里 `actionButtons("确定", "取消")`（可变参数），点击响应在
+  `clickActionButton { index -> ... }`（index 从 0 对应按钮顺序）：
+  ```kotlin
+  AlertDialog {
+      attr { showAlert(ctx.showAlert); title("提示"); message("登录成功"); actionButtons("确定") }
+      event { clickActionButton { _ -> ctx.showAlert = false } }
+  }
+  ```
+
 **vif 条件渲染（真编译探针验证）**
 - `vif({ 条件 }) { 内容 }`：条件用圆括号 lambda、内容用尾 lambda，**两个都必传（无默认值）**
 - 语义：把被条件化的子视图写进 vif 的内容块，不是把 vif 挂在该视图自己身上：
