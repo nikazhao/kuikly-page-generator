@@ -112,11 +112,19 @@ def _write_report(out_path: str, summary: dict, results: list[dict], cases_path:
     lines.append(f"- 平均自动修正次数：{summary['avg_fix_attempts']}")
     lines.append(f"- 平均耗时：{summary['avg_elapsed']}s")
     lines.append(f"- 平均规则符合度：**{summary['avg_compliance']:.0%}**（硬规则，确定性评分）\n")
-    lines.append(
-        "> ⚠️ **评估口径说明**：`success` 由 kotlinc 语法校验（已过滤 classpath 噪声）＋结构规则＋LLM 自审三层构成，"
-        "**并未在真实 Kuikly classpath 下编译运行**；「规则符合度」为纯确定性评分（`_kuikly_compliance`），"
-        "不依赖 LLM 自审，是可复现的硬指标。\n"
-    )
+    # 口径声明按实际情况输出：设了 KUIKLY_CLASSPATH 就是真编译校验，不能再写"未在真实 classpath 编译"
+    if os.getenv("KUIKLY_CLASSPATH", "").strip():
+        lines.append(
+            "> ⚠️ **评估口径说明**：已配置 `KUIKLY_CLASSPATH`，`success` 由 **Kuikly 真实 classpath 编译校验**"
+            "（unresolved reference / 类型不匹配等计为真错误）＋结构规则＋LLM 自审三层构成；"
+            "「规则符合度」为纯确定性评分（`_kuikly_compliance`），不依赖 LLM 自审，是可复现的硬指标。\n"
+        )
+    else:
+        lines.append(
+            "> ⚠️ **评估口径说明**：`success` 由 kotlinc 语法校验（已过滤 classpath 噪声）＋结构规则＋LLM 自审三层构成，"
+            "**并未在真实 Kuikly classpath 下编译运行**；「规则符合度」为纯确定性评分（`_kuikly_compliance`），"
+            "不依赖 LLM 自审，是可复现的硬指标。\n"
+        )
 
     lines.append("## 用例明细\n")
     lines.append("| # | 需求 | 期望类型 | 成功 | 修正次数 | 错误数 | 耗时(s) | 代码长度 | 规则符合度 |")
