@@ -1,0 +1,42 @@
+[
+  {
+    "requirement": "一个登录页面，有用户名输入框、密码输入框和登录按钮，按钮点击后验证输入",
+    "expected_type": "login"
+  },
+  {
+    "requirement": "一个设置页面，有头像、昵称显示，下面是开关列表用于通知、夜间模式等设置",
+    "expected_type": "settings"
+  },
+  {
+    "requirement": "一个商品详情页，顶部大图，下面是商品标题、价格、描述和加入购物车按钮",
+    "expected_type": "detail"
+  },
+  {
+    "requirement": "一个用户个人中心页面，头像在顶部居中，下面显示昵称、签名，底部是功能菜单列表",
+    "expected_type": "profile"
+  },
+  {
+    "requirement": "一个聊天列表页面，每行有头像、昵称、最后一条消息和时间",
+    "expected_type": "list"
+  },
+  {
+    "requirement": "一个注册表单页面，有手机号、验证码、密码输入框，验证码旁边有获取按钮，底部注册按钮",
+    "expected_type": "form"
+  },
+  {
+    "requirement": "一个天气展示页面，顶部城市名和温度，中间天气图标，底部有风力、湿度等信息卡片",
+    "expected_type": "detail"
+  },
+  {
+    "requirement": "一个搜索页面，顶部搜索输入框，下面是热门搜索标签的宫格布局",
+    "expected_type": "other"
+  },
+  {
+    "requirement": "一个数据看板页面，顶部展示三个数字指标卡片，下面是一个进度条和一个列表",
+    "expected_type": "dashboard"
+  },
+  {
+    "requirement": "一个空状态页面，中间大图标，下面提示文字和重试按钮",
+    "expected_type": "other"
+  }
+]
